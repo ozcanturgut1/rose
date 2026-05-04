@@ -1,6 +1,6 @@
 import { onRequest } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue, FieldPath } from "firebase-admin/firestore";
-import { requireAuth, requireRole } from "./requireAuth.js";
+import { requireAuth, requireRole, ROLES_QNB_MUTATE } from "./requireAuth.js";
 import { readEttnFromQnbDocsForDespatch } from "./enrichInvoiceWithRelatedDespatches.js";
 
 const db = getFirestore();
@@ -105,7 +105,7 @@ export const backfillDespatchEttnFromQnbDocs = onRequest(
       if (req.method !== "GET") return res.status(405).send("Method Not Allowed");
 
       const user = await requireAuth(req);
-      await requireRole(user.uid, ["admin", "manager", "accounting"]);
+      await requireRole(user.uid, ROLES_QNB_MUTATE);
 
       const docIdRaw = req.query?.docId ? String(req.query.docId).trim() : "";
       const allParam = req.query?.all;

@@ -10,7 +10,7 @@ import 'son_10_fatura_screen.dart';
 /// - **admin** → portal + tarih + Sorgula + tüm araçlar
 /// - **ara_onay** / **nihai_onay** → yalnızca Firestore listesi (tarih/sorgu yok; tüm uygun faturalar)
 /// - **muhasebe** → yalnızca `onayDurumu == onaylandı` faturalar (Firestore, tarih/sorgu yok)
-/// - **depo** → placeholder
+/// - **depo** → son 10 portal faturası listesi (salt okuma API ile aynı ekran)
 class UserHomeRouter extends StatelessWidget {
   const UserHomeRouter({super.key, required this.api, required this.user});
 
@@ -80,10 +80,10 @@ class UserHomeRouter extends StatelessWidget {
 
         switch (normalized) {
           case 'depo':
-            return _PlaceholderRoleScreen(
-              title: 'Depo',
-              message:
-                  'Depo rolü için ekran burada tanımlanacak.\n\nFirestore: user_profiles/${user.uid} → role: depo',
+            return Son10FaturaScreen(
+              api: api,
+              userRole: roleRaw ?? normalized,
+              profileBirim: data?['birim']?.toString(),
             );
           case 'admin':
           case 'ara_onay':

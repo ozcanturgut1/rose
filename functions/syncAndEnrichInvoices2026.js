@@ -10,7 +10,7 @@
  */
 import { onRequest } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
-import { requireAuth, requireRole } from "./requireAuth.js";
+import { requireAuth, requireRole, ROLES_QNB_MUTATE } from "./requireAuth.js";
 import { callConnector } from "./qnbCall.js";
 import { enrichOne } from "./enrichInvoiceWithRelatedDespatches.js";
 
@@ -89,7 +89,7 @@ export const syncAndEnrichInvoices2026 = onRequest(
       if (req.method !== "GET" && req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
       const user = await requireAuth(req);
-      await requireRole(user.uid, ["admin", "manager", "accounting"]);
+      await requireRole(user.uid, ROLES_QNB_MUTATE);
 
       const vknTckn = process.env.QNB_VKN_TCKN;
       if (!vknTckn) return res.status(500).json({ error: "QNB_VKN_TCKN missing in .env" });

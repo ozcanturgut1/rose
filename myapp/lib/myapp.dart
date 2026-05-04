@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'auth_wrapper.dart';
+import 'config/qnb_functions_base.dart';
 import 'services/qnb_api.dart';
 
 class MyApp extends StatelessWidget {
@@ -9,28 +10,27 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final api = QnbApi(
-      baseListUrl: 'https://europe-west1-curious-nucleus-392008.cloudfunctions.net/listQnbDocs',
-      baseApproveUrl: 'https://europe-west1-curious-nucleus-392008.cloudfunctions.net/approveQnbDoc',
-      baseViewUrl: 'https://europe-west1-curious-nucleus-392008.cloudfunctions.net/viewQnbDoc',
-      baseEnrichUrl: 'https://europe-west1-curious-nucleus-392008.cloudfunctions.net/enrichInvoiceWithRelatedDespatches',
-      baseRelatedDespatchesUrl: 'https://europe-west1-curious-nucleus-392008.cloudfunctions.net/getInvoiceRelatedDespatches',
-      baseSyncUrl: 'https://europe-west1-curious-nucleus-392008.cloudfunctions.net/syncQnbDocs',
-      baseDebugLastInvoiceIrsaliyeUrl: 'https://europe-west1-curious-nucleus-392008.cloudfunctions.net/debugQnbLastInvoiceIrsaliye',
-      baseFetchAndSaveDespatchUrl: 'https://europe-west1-curious-nucleus-392008.cloudfunctions.net/fetchAndSaveDespatchByBelgeNo',
-      baseFetchAndSaveInvoiceUrl: 'https://europe-west1-curious-nucleus-392008.cloudfunctions.net/fetchAndSaveInvoiceByEttn',
-      baseSyncAllDespatchesUrl: 'https://europe-west1-curious-nucleus-392008.cloudfunctions.net/syncAllDespatches',
-      baseSyncAllInvoicesUrl: 'https://europe-west1-curious-nucleus-392008.cloudfunctions.net/syncAllInvoices',
-      baseSyncAndEnrichInvoices2026Url: 'https://europe-west1-curious-nucleus-392008.cloudfunctions.net/syncAndEnrichInvoices2026',
-      baseListGelenBelgeleriExtUrl:
-          'https://europe-west1-curious-nucleus-392008.cloudfunctions.net/listGelenBelgeleriExt',
+      baseListUrl: qnbFunctionUrl('listQnbDocs'),
+      baseApproveUrl: qnbFunctionUrl('approveQnbDoc'),
+      baseViewUrl: qnbFunctionUrl('viewQnbDoc'),
+      baseEnrichUrl: qnbFunctionUrl('enrichInvoiceWithRelatedDespatches'),
+      baseRelatedDespatchesUrl: qnbFunctionUrl('getInvoiceRelatedDespatches'),
+      baseSyncUrl: qnbFunctionUrl('syncQnbDocs'),
+      baseDebugLastInvoiceIrsaliyeUrl: qnbFunctionUrl('debugQnbLastInvoiceIrsaliye'),
+      baseFetchAndSaveDespatchUrl: qnbFunctionUrl('fetchAndSaveDespatchByBelgeNo'),
+      baseFetchAndSaveInvoiceUrl: qnbFunctionUrl('fetchAndSaveInvoiceByEttn'),
+      baseSyncAllDespatchesUrl: qnbFunctionUrl('syncAllDespatches'),
+      baseSyncAllInvoicesUrl: qnbFunctionUrl('syncAllInvoices'),
+      baseSyncAndEnrichInvoices2026Url: qnbFunctionUrl('syncAndEnrichInvoices2026'),
+      baseListGelenBelgeleriExtUrl: qnbFunctionUrl('listGelenBelgeleriExt'),
       baseBackfillInvoicesFullByDateRangeUrl:
-          'https://europe-west1-curious-nucleus-392008.cloudfunctions.net/backfillInvoicesFullByDateRange',
+          qnbFunctionUrl('backfillInvoicesFullByDateRange'),
       baseBackfillDespatchEttnFromQnbDocsUrl:
-          'https://europe-west1-curious-nucleus-392008.cloudfunctions.net/backfillDespatchEttnFromQnbDocs',
+          qnbFunctionUrl('backfillDespatchEttnFromQnbDocs'),
       baseEnrichInvoiceDespatchesUblByEttnUrl:
-          'https://europe-west1-curious-nucleus-392008.cloudfunctions.net/enrichInvoiceDespatchesUblByEttn',
+          qnbFunctionUrl('enrichInvoiceDespatchesUblByEttn'),
       baseUpdateQnbInvoiceYonetimOnayUrl:
-          'https://europe-west1-curious-nucleus-392008.cloudfunctions.net/updateQnbInvoiceYonetimOnay',
+          qnbFunctionUrl('updateQnbInvoiceYonetimOnay'),
     );
 
     return MaterialApp(
@@ -44,7 +44,3 @@ class MyApp extends StatelessWidget {
     );
   }
 }
-
-
-
-

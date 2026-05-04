@@ -3,7 +3,7 @@ import { ensureAdmin } from "./adminInit.js";
 ensureAdmin();
 
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
-import { requireAuth, requireRole } from "./requireAuth.js";
+import { requireAuth, requireRole, ROLES_QNB_MUTATE } from "./requireAuth.js";
 
 const db = getFirestore();
 
@@ -55,7 +55,7 @@ export const approveQnbDoc = onRequest({ region: "europe-west1" }, async (req, r
     // 1. ve 2. onay: admin/manager/accounting rollerinden, farklı kullanıcılar
     // 3. (son) onay: firma yetkilisi / süper admin (SUPER_ADMIN_UID)
     const user = await requireAuth(req);
-    await requireRole(user.uid, ["admin", "manager", "accounting"]);
+    await requireRole(user.uid, ROLES_QNB_MUTATE);
 
     const isSuperAdmin = user.isSuperAdmin === true;
 

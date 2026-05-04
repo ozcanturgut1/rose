@@ -7,6 +7,50 @@ import admin from "firebase-admin";
 
 const db = getFirestore();
 
+/** Liste / okuma uçları (ör. son faturalar, depo dahil). */
+export const ROLES_QNB_READ = [
+  "admin",
+  "manager",
+  "accounting",
+  "ara_onay",
+  "nihai_onay",
+  "muhasebe",
+  "depo",
+];
+
+/** Senkron, backfill, onay, zenginleştirme (depo hariç). */
+export const ROLES_QNB_MUTATE = [
+  "admin",
+  "manager",
+  "accounting",
+  "ara_onay",
+  "nihai_onay",
+  "muhasebe",
+];
+
+function normalizeProfileRole(raw) {
+  if (raw == null || typeof raw !== "string") return null;
+  const s = raw.trim().toLowerCase().replace(/\s+/g, "_");
+  return s || null;
+}
+
+/**
+ * Etkin rol listesi: önce `users/{uid}.roles`, yoksa `user_profiles/{uid}.role`, yoksa `manager` (geriye uyum).
+ */
+export async function getRoleSlugsForUser(uid) {
+  const snap = await db.collection("users").doc(uid).get();
+  const userDoc = snap.exists ? snap.data() : null;
+  if (userDoc?.roles && Array.isArray(userDoc.roles) && userDoc.roles.length) {
+    return userDoc.roles.map((r) => String(r).toLowerCase());
+  }
+  const prof = await db.collection("user_profiles").doc(uid).get();
+  if (prof.exists) {
+    const one = normalizeProfileRole(prof.data()?.role);
+    if (one) return [one];
+  }
+  return ["manager"];
+}
+
 export async function requireAuth(req) {
   const authHeader =
   req.get("authorization") ||
@@ -54,16 +98,11 @@ export async function requireRole(uid, allowedRoles = []) {
     return true;
   }
 
-  const snap = await db.collection("users").doc(uid).get();
-  const userDoc = snap.exists ? snap.data() : null;
-
-  const roles =
-    userDoc?.roles && Array.isArray(userDoc.roles) && userDoc.roles.length
-      ? userDoc.roles
-      : ["manager"]; // DEFAULT
-
+  const roles = await getRoleSlugsForUser(uid);
+  const allowedNorm = allowedRoles.map((r) => String(r).toLowerCase());
   const ok =
-    allowedRoles.length === 0 || roles.some((r) => allowedRoles.includes(r));
+    allowedRoles.length === 0 ||
+    roles.some((r) => allowedNorm.includes(String(r).toLowerCase()));
 
   if (!ok) {
     const err = new Error("PERMISSION_DENIED");

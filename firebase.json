@@ -21,13 +21,88 @@
     ],
     "rewrites": [
       {
-        "source": "/api/listGelenBelgeleriExt",
-        "function": "listGelenBelgeleriExt",
+        "source": "/api/listQnbDocs",
+        "function": "listQnbDocs",
+        "region": "europe-west1"
+      },
+      {
+        "source": "/api/approveQnbDoc",
+        "function": "approveQnbDoc",
+        "region": "europe-west1"
+      },
+      {
+        "source": "/api/syncQnbDocs",
+        "function": "syncQnbDocs",
+        "region": "europe-west1"
+      },
+      {
+        "source": "/api/viewQnbDoc",
+        "function": "viewQnbDoc",
+        "region": "europe-west1"
+      },
+      {
+        "source": "/api/normalizeQnbInvoices",
+        "function": "normalizeQnbInvoices",
+        "region": "europe-west1"
+      },
+      {
+        "source": "/api/enrichInvoiceWithRelatedDespatches",
+        "function": "enrichInvoiceWithRelatedDespatches",
+        "region": "europe-west1"
+      },
+      {
+        "source": "/api/getInvoiceRelatedDespatches",
+        "function": "getInvoiceRelatedDespatches",
+        "region": "europe-west1"
+      },
+      {
+        "source": "/api/debugQnbLastInvoiceIrsaliye",
+        "function": "debugQnbLastInvoiceIrsaliye",
+        "region": "europe-west1"
+      },
+      {
+        "source": "/api/fetchAndSaveDespatchByBelgeNo",
+        "function": "fetchAndSaveDespatchByBelgeNo",
+        "region": "europe-west1"
+      },
+      {
+        "source": "/api/syncAllDespatches",
+        "function": "syncAllDespatches",
+        "region": "europe-west1"
+      },
+      {
+        "source": "/api/syncAllInvoices",
+        "function": "syncAllInvoices",
         "region": "europe-west1"
       },
       {
         "source": "/api/backfillInvoicesFullByDateRange",
         "function": "backfillInvoicesFullByDateRange",
+        "region": "europe-west1"
+      },
+      {
+        "source": "/api/syncAndEnrichInvoices2026",
+        "function": "syncAndEnrichInvoices2026",
+        "region": "europe-west1"
+      },
+      {
+        "source": "/api/listGelenBelgeleriExt",
+        "function": "listGelenBelgeleriExt",
+        "region": "europe-west1"
+      },
+      {
+        "source": "/api/backfillDespatchEttnFromQnbDocs",
+        "function": "backfillDespatchEttnFromQnbDocs",
+        "region": "europe-west1"
+      },
+      {
+        "source": "/api/enrichInvoiceDespatchesUblByEttn",
+        "function": "enrichInvoiceDespatchesUblByEttn",
+        "region": "europe-west1"
+      },
+      {
+        "source": "/api/updateQnbInvoiceYonetimOnay",
+        "function": "updateQnbInvoiceYonetimOnay",
         "region": "europe-west1"
       }
     ]

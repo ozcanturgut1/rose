@@ -4,7 +4,7 @@ import { getAuth } from "firebase-admin/auth";
 import { ensureAdmin } from "./adminInit.js";
 ensureAdmin();
 
-import { requireAuth, requireRole } from "./requireAuth.js";
+import { requireAuth, requireRole, ROLES_QNB_MUTATE } from "./requireAuth.js";
 
 const db = getFirestore();
 
@@ -51,7 +51,7 @@ async function requireInvoiceOnayPermission(uid) {
     const r = normalizeProfileRole(p.data()?.role);
     if (["admin", "ara_onay", "nihai_onay", "muhasebe"].includes(r)) return;
   }
-  await requireRole(uid, ["admin", "manager", "accounting"]);
+  await requireRole(uid, ROLES_QNB_MUTATE);
 }
 
 const setCors = (req, res) => {

@@ -12,7 +12,7 @@ import {
   extractRelatedDespatchRefsFromInvoiceUbl,
 } from "./extractRelatedBelgeNos.js";
 import { ublToFullJson } from "./ublToStructuredJson.js";
-import { requireAuth, requireRole } from "./requireAuth.js";
+import { requireAuth, requireRole, ROLES_QNB_MUTATE } from "./requireAuth.js";
 
 const db = getFirestore();
 
@@ -612,7 +612,7 @@ export const enrichInvoiceWithRelatedDespatches = onRequest(
       if (req.method !== "POST" && req.method !== "GET") return res.status(405).send("Method Not Allowed");
 
       const user = await requireAuth(req);
-      await requireRole(user.uid, ["admin", "manager", "accounting"]);
+      await requireRole(user.uid, ROLES_QNB_MUTATE);
 
       // Tek doc denemesi: ?testDoc=invoice_XXX veya ?docId=invoice_XXX
       let docId = req.query?.docId || req.body?.docId;

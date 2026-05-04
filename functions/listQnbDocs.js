@@ -1,6 +1,6 @@
 import { onRequest } from "firebase-functions/v2/https";
 import { getFirestore } from "firebase-admin/firestore";
-import { requireAuth, requireRole } from "./requireAuth.js";
+import { requireAuth, requireRole, ROLES_QNB_READ } from "./requireAuth.js";
 
 const db = getFirestore();
 
@@ -58,7 +58,7 @@ export const listQnbDocs = onRequest({ region: "europe-west1" }, async (req, res
     if (req.method !== "GET") return res.status(405).send("Method Not Allowed");
 
     const user = await requireAuth(req);
-    await requireRole(user.uid, ["admin", "manager", "accounting"]);
+    await requireRole(user.uid, ROLES_QNB_READ);
 
     const isSuperAdmin = user.isSuperAdmin === true;
 

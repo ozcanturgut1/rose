@@ -1,6 +1,6 @@
 import { onRequest } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
-import { requireAuth, requireRole } from "./requireAuth.js";
+import { requireAuth, requireRole, ROLES_QNB_MUTATE } from "./requireAuth.js";
 import { callConnector } from "./qnbCall.js";
 import { enrichOne, fetchDespatchUblByEttn } from "./enrichInvoiceWithRelatedDespatches.js";
 
@@ -40,7 +40,7 @@ export const syncQnbDocs = onRequest({ region: "europe-west1" }, async (req, res
     if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
     const user = await requireAuth(req);
-    await requireRole(user.uid, ["admin", "manager", "accounting"]);
+    await requireRole(user.uid, ROLES_QNB_MUTATE);
 
     const stateRef = db.collection("qnb_sync_state").doc("app");
 

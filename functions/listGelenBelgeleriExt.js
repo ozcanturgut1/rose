@@ -1,5 +1,5 @@
 import { onRequest } from "firebase-functions/v2/https";
-import { requireAuth, requireRole } from "./requireAuth.js";
+import { requireAuth, requireRole, ROLES_QNB_READ } from "./requireAuth.js";
 import { callConnector } from "./qnbCall.js";
 
 const setCors = (req, res) => {
@@ -336,7 +336,7 @@ export const listGelenBelgeleriExt = onRequest({ region: "europe-west1" }, async
     if (req.method !== "GET") return res.status(405).send("Method Not Allowed");
 
     const user = await requireAuth(req);
-    await requireRole(user.uid, ["admin", "manager", "accounting"]);
+    await requireRole(user.uid, ROLES_QNB_READ);
 
     const vknTckn = process.env.QNB_VKN_TCKN;
     if (!vknTckn) return res.status(500).json({ error: "QNB_VKN_TCKN missing in .env" });
