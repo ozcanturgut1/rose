@@ -1,0 +1,300 @@
+{
+  "modelKodu": "FE2067U",
+  "marka": "Aeronautica Militare",
+  "ölçü tablosu": [
+    {
+      "id": "2025-05-06T18:01:32.007501",
+      "notes": "Omuzlar 2.5cm öne dönüyor",
+      "tarih": {
+        "_seconds": 1746543692,
+        "_nanoseconds": 8340000
+      },
+      "header": {
+        "mod": "mod. 03-PB S rev. 00",
+        "last_revision_date": "20/2/23",
+        "supplier": "GULTEKS",
+        "description": "Brushed Stretch Cotton Comfort Fit Sweatshirt",
+        "season": "FW25/26",
+        "style": "FE2067U",
+        "brand": "CRISTIANO di THIENE",
+        "measurement_chart": "MEASUREMENT CHART / SCHEDA MISURE",
+        "size_sample": "L"
+      },
+      "measurements": [
+        {
+          "sizes": {
+            "S": "66",
+            "XL": "73",
+            "3XL": "77",
+            "4XL": "79",
+            "L": "70",
+            "M": "68",
+            "XXL": "75,5"
+          },
+          "name": "Front length from HPS",
+          "sample_measure": "70,5"
+        },
+        {
+          "sizes": {
+            "S": "52",
+            "XL": "60",
+            "3XL": "66",
+            "4XL": "70",
+            "L": "56",
+            "M": "54",
+            "XXL": "62"
+          },
+          "name": "Chest width 2 cm under armhole",
+          "sample_measure": "56"
+        },
+        {
+          "sizes": {
+            "S": "14,5",
+            "XL": "15,5",
+            "3XL": "16,5",
+            "4XL": "17",
+            "L": "15",
+            "M": "15",
+            "XXL": "16"
+          },
+          "name": "Upper chest position from shoulder",
+          "sample_measure": "15"
+        },
+        {
+          "sizes": {
+            "S": "39",
+            "XL": "46",
+            "3XL": "51",
+            "4XL": "53",
+            "L": "43",
+            "M": "41",
+            "XXL": "49"
+          },
+          "name": "Upper chest width",
+          "sample_measure": "42,7"
+        },
+        {
+          "sizes": {
+            "S": "37",
+            "XL": "44",
+            "3XL": "49",
+            "4XL": "51",
+            "L": "41",
+            "M": "39",
+            "XXL": "47"
+          },
+          "name": "Front body width",
+          "sample_measure": "41"
+        },
+        {
+          "sizes": {
+            "S": "8",
+            "XL": "9,5",
+            "3XL": "10,5",
+            "4XL": "11",
+            "L": "9",
+            "M": "8,5",
+            "XXL": "10"
+          },
+          "name": "Front body width to height",
+          "sample_measure": "8,5"
+        },
+        {
+          "sizes": {
+            "S": "19",
+            "XL": "22",
+            "3XL": "24",
+            "4XL": "25",
+            "L": "21",
+            "M": "20",
+            "XXL": "23"
+          },
+          "name": "Chest position from center back",
+          "sample_measure": "21"
+        },
+        {
+          "sizes": {
+            "S": "85",
+            "XL": "89,5",
+            "3XL": "94,5",
+            "4XL": "96,5",
+            "L": "87,5",
+            "M": "85,5",
+            "XXL": "92"
+          },
+          "name": "Sleeve length from center back",
+          "sample_measure": "89,75"
+        },
+        {
+          "sizes": {
+            "S": "25",
+            "XL": "27",
+            "3XL": "29",
+            "4XL": "30",
+            "L": "26",
+            "M": "26",
+            "XXL": "28"
+          },
+          "name": "Armhole width (straight measured)",
+          "sample_measure": "26"
+        },
+        {
+          "sizes": {
+            "S": "20,1",
+            "XL": "22,5",
+            "3XL": "24,5",
+            "4XL": "25,5",
+            "L": "21,5",
+            "M": "20,8",
+            "XXL": "23,5"
+          },
+          "name": "Muscle width 1 cm under armhole",
+          "sample_measure": "21,5"
+        },
+        {
+          "sizes": {
+            "S": "15",
+            "XL": "17",
+            "3XL": "19",
+            "4XL": "20",
+            "L": "16",
+            "M": "15,5",
+            "XXL": "18"
+          },
+          "name": "Forearm width 25 cm from bottom",
+          "sample_measure": "16"
+        },
+        {
+          "sizes": {
+            "S": "10",
+            "XL": "10",
+            "3XL": "10",
+            "4XL": "10",
+            "L": "10",
+            "M": "10",
+            "XXL": "10"
+          },
+          "name": "Cuff rib width",
+          "sample_measure": "10"
+        },
+        {
+          "sizes": {
+            "S": "6",
+            "XL": "6",
+            "3XL": "6",
+            "4XL": "6",
+            "L": "6",
+            "M": "6",
+            "XXL": "6"
+          },
+          "name": "Cuff rib height",
+          "sample_measure": "6"
+        },
+        {
+          "sizes": {
+            "S": "17",
+            "XL": "18,5",
+            "3XL": "19,5",
+            "4XL": "20",
+            "L": "18",
+            "M": "17,5",
+            "XXL": "19"
+          },
+          "name": "Neck width from HPS to HPS",
+          "sample_measure": "18,7"
+        },
+        {
+          "sizes": {
+            "S": "8,5",
+            "XL": "10",
+            "3XL": "11",
+            "4XL": "11,5",
+            "L": "9,5",
+            "M": "9",
+            "XXL": "10,5"
+          },
+          "name": "Neck height from center back",
+          "sample_measure": "9,8"
+        },
+        {
+          "sizes": {
+            "S": "7",
+            "XL": "8",
+            "3XL": "9",
+            "4XL": "9,5",
+            "L": "7,5",
+            "M": "7",
+            "XXL": "8,5"
+          },
+          "name": "Collar point height",
+          "sample_measure": "7,2"
+        },
+        {
+          "sizes": {
+            "S": "11",
+            "XL": "12",
+            "3XL": "13",
+            "4XL": "13,5",
+            "L": "11,5",
+            "M": "11,5",
+            "XXL": "12,5"
+          },
+          "name": "Pockets width",
+          "sample_measure": "12"
+        },
+        {
+          "sizes": {
+            "S": "19",
+            "XL": "21",
+            "3XL": "22",
+            "4XL": "22,5",
+            "L": "20",
+            "M": "19,5",
+            "XXL": "21,5"
+          },
+          "name": "Pockets length",
+          "sample_measure": "21"
+        },
+        {
+          "sizes": {
+            "S": "7",
+            "XL": "8",
+            "3XL": "9",
+            "4XL": "9,5",
+            "L": "7,5",
+            "M": "7",
+            "XXL": "8,5"
+          },
+          "name": "Chest pocket from shoulder point",
+          "sample_measure": "7,5"
+        },
+        {
+          "sizes": {
+            "S": "3,5",
+            "XL": "3,5",
+            "3XL": "3,5",
+            "4XL": "3,5",
+            "L": "3,5",
+            "M": "3,5",
+            "XXL": "3,5"
+          },
+          "name": "Chest pocket from center front",
+          "sample_measure": "4,5"
+        },
+        {
+          "sizes": {
+            "S": "15",
+            "XL": "15",
+            "3XL": "15",
+            "4XL": "15",
+            "L": "15",
+            "M": "15",
+            "XXL": "15"
+          },
+          "name": "Zip length",
+          "sample_measure": "15"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,268 @@
+{
+  "modelKodu": "SH9905",
+  "order_quantity_breakdown": {
+    "colors": {
+      "132": {
+        "sizes": {
+          "T4": 115,
+          "T5": 60,
+          "T6": 55,
+          "T7": 15,
+          "T2": 25,
+          "T3": 65
+        }
+      },
+      "I1K": {
+        "sizes": {
+          "T4": 145,
+          "T5": 80,
+          "T6": 70,
+          "T7": 20,
+          "T2": 30,
+          "T3": 85
+        }
+      },
+      "C7Z": {
+        "sizes": {
+          "T4": 150,
+          "T5": 80,
+          "T6": 70,
+          "T7": 20,
+          "T2": 30,
+          "T3": 85
+        }
+      }
+    }
+  },
+  "brand": "Lacoste",
+  "bill_of_materials": {
+    "Tüp Ekstrafor": {
+      "consumption_meter": 1,
+      "supplier": "GÜL"
+    },
+    "Barkod": {
+      "item_code": "F0853",
+      "supplier": "DEVANLAY",
+      "consumption_quantity": 1
+    },
+    "Yıkama Talimatı": {
+      "supplier": "DİZAYN ETİKET",
+      "description": "Sezon Kodu 251",
+      "consumption_quantity": 1
+    },
+    "Ara Karton": {
+      "item_code": "9603",
+      "supplier": "GÜLLÜCE",
+      "consumption_quantity": 1
+    },
+    "Beden Etiketi": {
+      "item_code": "F10902",
+      "sizes": {
+        "T4": {
+          "used_for": "T4"
+        },
+        "T5": {
+          "used_for": "T5"
+        },
+        "T6": {
+          "used_for": "T6"
+        },
+        "T7": {
+          "used_for": "T7"
+        },
+        "T2": {
+          "used_for": "T2"
+        },
+        "T3": {
+          "used_for": "T3"
+        }
+      },
+      "supplier": "DEVANLAY",
+      "consumption_quantity": 1
+    },
+    "Barkodaltı Kart": {
+      "item_code": "F73961",
+      "supplier": "GÜVEN",
+      "consumption_quantity": 1
+    },
+    "Timsahlı Beyaz İp": {
+      "item_code": "F72106",
+      "supplier": "GÜVEN",
+      "consumption_quantity": 1
+    },
+    "Timsah": {
+      "item_code": {
+        "132": "F1221+30.ZWE8",
+        "I1K": "F1221+30.ZUK6",
+        "C7Z": "F1221+30.ZUQ3"
+      },
+      "supplier": "DEVANLAY",
+      "consumption_quantity": 1
+    },
+    "Poşet": {
+      "item_code": "9429RC",
+      "supplier": "CANLAR AMBALAJ",
+      "consumption_quantity": 1
+    },
+    "Beden Kumaşı": {
+      "item_code": {
+        "132": "132",
+        "I1K": "I1K",
+        "C7Z": "C7Z"
+      },
+      "consumption_meter": 1,
+      "supplier": "GÜL",
+      "description": "%100 Pamuk 400 GR - French Tery"
+    },
+    "Dokuma Etiket": {
+      "item_code": "F13168",
+      "supplier": "DEVANLAY",
+      "consumption_quantity": 1
+    },
+    "Patch": {
+      "item_code": {
+        "132": "F15683.ZUG3",
+        "I1K": "F15683.ZUM3",
+        "C7Z": "F15683.ZUMA"
+      },
+      "supplier": "DEVANLAY",
+      "consumption_quantity": 1
+    },
+    "Kol ve Etek Ribana": {
+      "item_code": {
+        "132": "132",
+        "I1K": "I1K",
+        "C7Z": "C7Z"
+      },
+      "supplier": "GÜL",
+      "description": "%100 Pamuk 1*1 Ribana",
+      "consumption_meter": 1
+    }
+  },
+  "waybills": {
+    "incoming": {
+      "DEA2025000002066": {
+        "waybill_date": "24/02/2025",
+        "gönderen": "Devanlay-Eren Tekstil Sanayi A.Ş.",
+        "items": [
+          {
+            "birim fiyat (TL)": 0.436,
+            "kullanim yeri": "Beden Etiketi",
+            "mal": "10902.-.2",
+            "aciklama": "Size Etiket.Hammadde.Malzeme",
+            "beden": "T2",
+            "miktar (adet)": 8
+          },
+          {
+            "miktar (Adet)": 2,
+            "kullanim yeri": "Beden Etiketi",
+            "mal": "10902.-.3",
+            "beden": "T3",
+            "aciklama": "Size Etiket.Hammadde.Malzeme",
+            "birim fiyat (TL)": 0.43603
+          },
+          {
+            "mal": "10902.-.4",
+            "kullanim yeri": "Beden Etiketi",
+            "beden": "T4",
+            "birim fiyat (TL)": 0.436,
+            "aciklama": "Size Etiket.Hammadde.Malzeme",
+            "miktar (adet)": 4
+          },
+          {
+            "miktar (adet)": 10,
+            "kullanim yeri": "Beden Etiketi",
+            "aciklama": "Size Etiket.Hammadde.Malzeme",
+            "beden": "T5",
+            "mal": "10902.-.5",
+            "birim fiyat (TL)": 0.436
+          },
+          {
+            "mal": "10902.-.6",
+            "aciklama": "Size Etiket.Hammadde.Malzeme",
+            "beden": "T6",
+            "birim fiyat (TL)": 0.436,
+            "kullanim yeri": "Beden Etiketi",
+            "miktar (adet)": 2
+          },
+          {
+            "beden": "T7",
+            "mal": "10902.-.7",
+            "birim fiyat (TL)": 0.436,
+            "aciklama": "Size Etiket.Hammadde.Malzeme",
+            "miktar (adet)": 18,
+            "kullanim yeri": "Beden Etiketi"
+          },
+          {
+            "birim fiyat (TL)": 1.79,
+            "mal": "1221+30.ZUQ3",
+            "aciklama": "Timsah.Hammadde.Malzeme",
+            "renk": "C7Z",
+            "kullanim yeri": "Timsah",
+            "miktar (adet)": 9
+          },
+          {
+            "mal": "15683.ZUMA",
+            "aciklama": "Size Etiket.Hammadde.Malzeme",
+            "renk": "C7Z",
+            "birim fiyat (TL)": 1.07212,
+            "miktar (adet)": 9,
+            "kullanim yeri": "Patch"
+          }
+        ]
+      },
+      "DEA2025000002385": {
+        "waybill_date": "05-03-2025",
+        "supplier": {
+          "name": "DEVANLAY-EREN TEKSTİL SANAYİ A.Ş."
+        },
+        "items": [
+          {
+            "mal": "1221+30.C02716.-",
+            "aciklama": "TIMSAH.HAMMADDE.MALZEME",
+            "miktar (adet)": 1500,
+            "birim fiyat (TL)": 5,
+            "kullanim yeri": "Timsah"
+          }
+        ]
+      }
+    }
+  },
+  "cut_quantity_breakdown": {
+    "colors": {
+      "132": {
+        "sizes": {
+          "T4": 126,
+          "T5": 66,
+          "T6": 60,
+          "T7": 17,
+          "T2": 28,
+          "T3": 72
+        }
+      },
+      "I1K": {
+        "sizes": {
+          "T4": 160,
+          "T5": 88,
+          "T6": 76,
+          "T7": 22,
+          "T2": 33,
+          "T3": 92
+        }
+      },
+      "CM7": {
+        "sizes": {
+          "T4": 160,
+          "T5": 88,
+          "T6": 76,
+          "T7": 22,
+          "T2": 32,
+          "T3": 88
+        }
+      }
+    }
+  },
+  "id": "SH49905",
+  "vectorJsonFileId": "file-EsTdzqifKDc6KG3Bfs4PCj",
+  "vectorMdFileId": "file-57jgRSUnF9XocRSVFx4YAh"
+}

@@ -1,0 +1,61 @@
+{
+  "modelKodu": "tf55",
+  "items": [
+    {
+      "malzeme_kumas": "YIKAMA TALİMATI",
+      "70V": "F15190",
+      "sarfi̇yat": "",
+      "açiklama": "SEZON KODU 251",
+      "tedari̇kçi̇": "DİZAYN ETİKET"
+    },
+    {
+      "malzeme_kumas": "DOKUMA ETİKET",
+      "70V": "F1221+30",
+      "sarfi̇yat": "",
+      "açiklama": "REGULAR FIT",
+      "tedari̇kçi̇": "DEVANLAY"
+    },
+    {
+      "malzeme_kumas": "TİMSAH",
+      "70V": "",
+      "sarfi̇yat": "",
+      "açiklama": "YEŞİL TİMSAH",
+      "tedari̇kçi̇": "DEVANLAY"
+    },
+    {
+      "malzeme_kumas": "TİMSAHLI BEYAZ İP",
+      "70V": "F72106",
+      "sarfi̇yat": "1 ADET",
+      "açiklama": "",
+      "tedari̇kçi̇": "GÜVEN"
+    },
+    {
+      "malzeme_kumas": "BARKOD",
+      "70V": "F0853",
+      "sarfi̇yat": "1 ADET",
+      "açiklama": "",
+      "tedari̇kçi̇": "DEVANLAY"
+    },
+    {
+      "malzeme_kumas": "BARKODALTI KART",
+      "70V": "F73961",
+      "sarfi̇yat": "1 ADET",
+      "açiklama": "",
+      "tedari̇kçi̇": "GÜVEN"
+    },
+    {
+      "malzeme_kumas": "ARA KARTON",
+      "70V": "9603",
+      "sarfi̇yat": "1 ADET",
+      "açiklama": "",
+      "tedari̇kçi̇": "GÜLLÜCE"
+    },
+    {
+      "malzeme_kumas": "POŞET",
+      "70V": "9429RC",
+      "sarfi̇yat": "1 ADET",
+      "açiklama": "",
+      "tedari̇kçi̇": "CANLAR AMBALAJ"
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+Bu servis, parametre olarak gönderilen VKN, belgeTuru ve sonAlinanBelgeSiraNumarasi bazında, gelen fatura listesini almak için kullanılmaktadır.
+Metot: gelenBelgeleriListeleExt
+Request
+Parametre Adı	Tip	Açıklama	Z / O
+vergiTcKimlikNo	String	10 ya da 11 haneli VKN ya da TCKN değeri	Z
+sonAlinanBelgeSiraNumarasi	String	Açıklama "Gelen Fatura Akışı" sayfasında belirtilmiştir.	Z
+belgeTuru	String	FATURA, UYGULAMA_YANITI	Z
+alanEtiket	String	Belge alıcısının posta kutusu etiket bilgisi	O
+belgelerAlindiMi	Boolean	BelgelerAlindiMİ parametresi daha öncesinde belgelerAlindi metotu ile işaretlenen belgelerin filtrelemesi sağlamaktadır. İşaretlenen belgelerin gelmesini istenirse belgelerAlindiMi inputuna "true" değeri, gelmesini istenmezse "false" değeri vererek filtreleme yapılabilir.	O
+donusTipiVersiyon	String	1.0,2.0,3.0,4.0,5.0 ve 6,0 olabilir. Dönüş tipi versiyonuna göre gelen bilgilerin detayları için web servis dökümanını kontrol edebilirsiniz. Bu parametre opsiyoneldir. Boş bırakılması durumunda 1.0 olarak kabul edilir.	O
+erpKodu	String	QNB eSolutions proje ekibi tarafından verilen kaynak kodu değeri. Inhouse entegrasyonlarda kullanımı zorunlu değildir.	Z/O
+ettn	String	Gelen fatura/irsaliyenin ETTN bilgisini ifade eder.Bu parametre çoklanabilir.	O
+faturaTarihiBaslangic	String	Fatura tarihini ifade eder. Format : yyyyMMdd	O
+faturaTarihiBitis	String	Fatura tarihini ifade eder. Format : yyyyMMdd	O
+gelisTarihiBaslangic	String	Fatura geliş tarihini ifade eder. Format : yyyyMMdd	O
+gelisTarihiBitis	String	Fatura geliş tarihini ifade eder. Format : yyyyMMdd	O
+onayDurum	String	Belirli bir onay durumunda olan faturaların listelenmesi için kullanılır. “ONAYBEKLEYEN”, “ONAYLANAN”, “HEPSI” değerlerinden birini alabilir. Boş bırakılması durumunda sadece “ONAYLANAN” faturalar listelenecektir.	O
+Response
+Parametre Adı	Tip	Açıklama
+belgeNo	String	Fatura numarasını ifade eder.
+belgeSiraNo	String	Faturaya portal tarafından atanan sıra numarasını ifade eder. sonAlinanBelgeSiraNo parametresi ile aynı değerdir.
+belgeTarihi	String	Fatura tarih bilgisini ifade eder.
+belgeTuru	String	Olası değerler; FATURA, IRSALIYE, UYGULAMA_YANITI, IRSALIYE_YANITI
+ettn	String	Faturanın ETTN (UUID) bilgisini ifade eder.
+gonderenEtiket	String	Fatura gönderen firmanın etiket adresini ifade eder.
+gonderenVknTckn	String	Fatura gönderen firmanın VKN/TCKN bilgisini ifade eder.
+alanEtiket	String	Faturayı alan firmanın posta kutusu etiket bilgisini ifade eder.
+aliciUnvan	String	Faturayı alan firmanın unvan bilgisini ifade eder.
+saticiUnvan	String	Faturayı gönderen firmanın unvan bilgisini ifade eder.
+zarfId	String	Faturanın içinde bulunduğu zarfın numarasını ifade eder.
+odenecekTutar	String	Faturanın ödenecek tutar bilgisini ifade eder.
+odenecekTutarDovizCinsi	String	Faturanın oluşturulduğu döviz cinsini ifade eder. (TRY,USD, EUR vb.)
+arsivlenmis	String	Faturanın portaldeki arşiv durumunu ifade eder. 0 : Arşivlenmemiş, 1 : Arşivlenmiş
+belgeHash	String	Belgenin hash değerini ifade eder.
+faturaGelisTarihi	String	Faturanın sisteme geliş tarihini ifade eder.
+
+
+
+
+Request
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ser="http://service.connector.uut.cs.com.tr/">
+   <soapenv:Body>
+      <ser:gelenBelgeleriListeleExt>         
+         <parametreler>
+            <belgeTuru>FATURA</belgeTuru>        
+            <donusTipiVersiyon>6.0</donusTipiVersiyon> 
+            <sonAlinanBelgeSiraNumarasi>1000</sonAlinanBelgeSiraNumarasi>
+            <vergiTcKimlikNo>32......0</vergiTcKimlikNo>
+         </parametreler>
+      </ser:gelenBelgeleriListeleExt>
+   </soapenv:Body>
+</soapenv:Envelope>
+
+Response
+<S:Envelope xmlns:S="http://schemas.xmlsoap.org/soap/envelope/">
+   <S:Body>
+      <ns2:gelenBelgeleriListeleExtResponse xmlns:ns2="http://service.connector.uut.cs.com.tr/">
+         <return xsi:type="ns2:belgev6" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <belgeNo>AAA2017000000080</belgeNo>
+            <belgeSiraNo>1010</belgeSiraNo>
+            <belgeTarihi>20170311</belgeTarihi>
+            <belgeTuru>FATURA</belgeTuru>
+            <ettn>22056A27-D326-4FE0-A538-F775F36A28BA</ettn>
+            <gonderenEtiket>urn:mail:testgb@cs.com.tr</gonderenEtiket>
+            <gonderenVknTckn>1234567802</gonderenVknTckn>
+            <alanEtiket>urn:mail:test@test.com.tr</alanEtiket>
+            <aliciUnvan>Test A.Ş</aliciUnvan>
+            <belgeVersiyon>1.0</belgeVersiyon>
+            <saticiUnvan>Test  A.Ş.</saticiUnvan>
+            <zarfId>06840CFC-25D6-4794-BEA1-420CE078C760</zarfId>
+            <odenecekTutar>77880.00</odenecekTutar>
+            <odenecekTutarDovizCinsi>TRY</odenecekTutarDovizCinsi>
+            <arsivlenmis>1</arsivlenmis>
+            <belgeHash>cytR0xyUZANEFO/9P+EPWYKLRnkGqDR6dFnHxxNfY0U=</belgeHash>
+            <faturaGelisTarihi>20170208160730818</faturaGelisTarihi>
+            <profileId>TEMELFATURA</profileId>
+         </return>
+      </ns2:gelenBelgeleriListeleExtResponse>
+   </S:Body>
+</S:Envelope>
+

@@ -1,0 +1,52 @@
+---
+description: 
+alwaysApply: true
+---
+
+# Dikkatli ve Kontrollü İlerleme
+
+- **Acele etmeden, adım adım** ilerleyin.
+- Her değişiklikten önce mevcut davranışı ve bağımlılıkları göz önünde bulundurun.
+- **Kontrollü** hareket edin: çalışan yerleri bozmayın, hatalı işlemlere sebep olmayın.
+- Değişiklik yaparken gerekirse önce bağımlılıkları ve kullanım yerlerini tespit edin, sonra uygulayın.
+- Belirsiz durumlarda küçük, test edilebilir adımlar tercih edin.
+1. Bağlamdan kopmama
+Kullanıcı girdilerine sadık kal; talimatlara uygun hareket et.
+Diyalogda önceki bağlamdan kopmadan tutarlı cevap ver.
+Güncel ve doğru bilgi için bağlamı ve verileri dikkatlice takip et.
+2. Kullanıcının talebi dışında müdahale
+İzin olmadan liste, veri veya içerikte değişiklik yapma.
+Ek bilgi/öneri sunarken bunların açıkça fark edilmesini sağla.
+Kritik karar veya değişikliklerde kullanıcı onayı olmadan hareket etme.
+3. Tutarlı ve güvenilir yazılım geliştirme
+SOLID, DRY, KISS gibi temel prensiplere uy.
+Her aşamada uygun testler yap; hata ve tutarsızlıkları azalt.
+Kod ve kararları açık şekilde belgele.
+Gizlilik ve güvenlik kurallarına uy; yetkisiz erişimi engelle.
+4. Güncelleme ve geliştirme prensipleri
+Değişiklikleri versiyon kontrolü ile takip et.
+Kullanıcı geri bildirimlerini dikkate al.
+Kod inceleme ve test süreçlerini düzenli uygula.
+Mümkün olan en güncel paket ve bilgilerle çalış.
+5. Kod okunabilirliği ve standartları
+Okunabilir, anlaşılır ve tutarlı isimlendirme kullan.
+Proje standartlarına (ESLint, Prettier, Dart Format vb.) uy.
+Gereksiz karmaşıklıktan kaçın; kodu sade tut.
+6. Sürüm ve dağıtım yönetimi
+Sürüm numaralandırması (semver) ve sürüm notlarını güncel tut.
+Dağıtım öncesi otomatik test ve kontrolleri çalıştır.
+7. Hata yönetimi ve izleme
+Hataları kullanıcıya açık ve anlaşılır bildir; logla.
+Kritik hatalar için otomatik bildirim/izleme (Sentry, LogRocket vb.) kullan.
+8. Bağımlılık yönetimi
+Kullanılan paket ve kütüphanelerin güvenliğini ve lisanslarını düzenli kontrol et.
+Gereksiz bağımlılıkları projeden kaldır.
+Not: Bu projede geliştirme ortamı Windows; yol, dosya ve komutlarda buna dikkat et.
+9. Modül yüklenirken ağ veya dış servis çağrısı yapma (deploy / analiz güvenliği)
+Amaç: Deploy, build veya analiz sırasında modül yüklenirken top-level’da ağ/dış servis çağrısı olmasın; servis 503/kapalı olsa bile yükleme kırılmasın.
+Kural: Modülün en üstünde (import’lardan hemen sonra, handler dışında) await ile HTTP, WSDL, veritabanı vb. çağrı yazma. Bu tür çağrıları sadece istek handler’ı, event tetikleyicisi veya açıkça çağrılan fonksiyon içinde yap.
+Yanlış örnek:
+const client = await getSoapClient();export const myFunction = onRequest(async (req, res) => { ... });
+Doğru örnek:
+export const myFunction = onRequest(async (req, res) => {  const client = await getSoapClient();  ...});
+Özet: Top-level’da ağ/dış servis çağrısı yapma; bu çağrıları her zaman handler veya fonksiyon içine al.

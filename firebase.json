@@ -1,0 +1,35 @@
+{
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "*.local"
+      ]
+    }
+  ],
+  "hosting": {
+    "public": "public",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "/api/listGelenBelgeleriExt",
+        "function": "listGelenBelgeleriExt",
+        "region": "europe-west1"
+      },
+      {
+        "source": "/api/backfillInvoicesFullByDateRange",
+        "function": "backfillInvoicesFullByDateRange",
+        "region": "europe-west1"
+      }
+    ]
+  }
+}

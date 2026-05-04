@@ -1,0 +1,97 @@
+{
+  "modelKodu": "JF0508",
+  "brand": "Lacoste",
+  "order_quantity_breakdown": {
+    "colors": {
+      "I1K": {
+        "sizes": {
+          "T34": 148,
+          "T36": 177,
+          "T38": 109,
+          "T40": 67,
+          "T42": 2,
+          "T44": 1
+        }
+      }
+    }
+  },
+  "cut_quantity_breakdown": {
+    "colors": {
+      "I1K": {
+        "sizes": {
+          "T34": 160,
+          "T36": 190,
+          "T38": 120,
+          "T40": 72,
+          "T42": 3,
+          "T44": 2
+        }
+      }
+    }
+  },
+  "waybills": {
+    "incoming": {
+      "IRS2025000000780": {
+        "waybill_date": "06/05/2025",
+        "items": {
+          "çıtçıt": {
+            "amount_quantity": 830
+          }
+        }
+      },
+      "YOE2024000007732": {
+        "waybill_date": "26/12/2024",
+        "items": {
+          "3,5 cm Dokuma Lastik": {
+            "amount_meter": 50
+          }
+        }
+      }
+    },
+    "outgoing": {
+      "GLT2025000000163": {
+        "waybill_date": "20/12/2025",
+        "items": {
+          "çıtçıt": {
+            "amount_quantity": 340
+          }
+        }
+      }
+    }
+  },
+  "bill_of_materials": {
+    "Çıtçıt": {
+      "item_code": "F5166+15",
+      "consumption_quantity": 8
+    },
+    "Kauçuk Timsah": {
+      "item_code": "F0100"
+    },
+    "3,5 cm Dokuma Lastik": {
+      "consumption_meter": 1
+    },
+    "Kadın Relaxed Fit Etiketi": {
+      "item_code": "F15194",
+      "sizes": {
+        "T34": {
+          "used_for": "T34"
+        },
+        "T36": {
+          "used_for": "T36"
+        },
+        "T38": {
+          "used_for": "T38"
+        },
+        "T40": {
+          "used_for": "T40"
+        },
+        "T42": {
+          "used_for": "T42"
+        },
+        "T44": {
+          "used_for": "T44"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Portala düşen son faturalar (gelenBelgeleriListeleExt)</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --text: #e7ecf3;
+      --muted: #8b9cb3;
+      --accent: #3b82f6;
+      --border: #2d3a4d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, Segoe UI, Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      line-height: 1.5;
+    }
+    .wrap {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 1.5rem 1rem 3rem;
+    }
+    h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin: 0 0 0.5rem;
+    }
+    .sub {
+      color: var(--muted);
+      font-size: 0.875rem;
+      margin-bottom: 1.25rem;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.25rem;
+    }
+    label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.35rem; }
+    input[type="password"],
+    input[type="text"] {
+      width: 100%;
+      max-width: 560px;
+      padding: 0.5rem 0.65rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 0.875rem;
+    }
+    .row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-end; margin-top: 0.75rem; }
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 0.55rem 1rem;
+      border-radius: 6px;
+      font-weight: 500;
+      cursor: pointer;
+      font-size: 0.875rem;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .err { color: #f87171; font-size: 0.875rem; margin-top: 0.75rem; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8125rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 0.5rem 0.65rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+    th { color: var(--muted); font-weight: 500; white-space: nowrap; }
+    tr:hover td { background: rgba(255,255,255,0.02); }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .meta { font-size: 0.75rem; color: var(--muted); margin-top: 1rem; }
+    code { font-size: 0.75rem; background: var(--bg); padding: 0.1rem 0.35rem; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Portala düşen son 10 fatura</h1>
+    <p class="sub">
+      QNB <code>gelenBelgeleriListeleExt</code> (FATURA, dönüş 6.0) ile birleştirilmiş sayfalar; geliş tarihine göre en yeni kayıtlar.
+    </p>
+
+    <div class="panel">
+      <label for="token">Firebase ID token (Authorization Bearer)</label>
+      <input id="token" type="password" autocomplete="off" placeholder="Firebase Auth idToken yapıştırın" />
+      <div class="row">
+        <button type="button" id="btn">Listeyi yükle</button>
+      </div>
+      <p id="err" class="err" hidden></p>
+    </div>
+
+    <div class="panel" id="resultPanel" hidden>
+      <table>
+        <thead>
+          <tr>
+            <th>Belge no</th>
+            <th>Sıra</th>
+            <th>Fatura tarihi</th>
+            <th>Satıcı ünvanı (saticiUnvan)</th>
+            <th class="num">Tutar</th>
+            <th>Geliş</th>
+            <th>ETTN</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <p class="meta" id="meta"></p>
+    </div>
+  </div>
+
+  <script>
+    function formatGelis(s) {
+      const t = String(s || "").trim();
+      if (t.length >= 14 && /^\d+$/.test(t)) {
+        const y = t.slice(0, 4);
+        const mo = t.slice(4, 6);
+        const d = t.slice(6, 8);
+        const hh = t.slice(8, 10);
+        const mm = t.slice(10, 12);
+        const ss = t.slice(12, 14);
+        return y + "-" + mo + "-" + d + " " + hh + ":" + mm + ":" + ss;
+      }
+      return t || "—";
+    }
+
+    function formatBelgeTarih(s) {
+      const t = String(s || "").trim();
+      if (t.length === 8 && /^\d{8}$/.test(t)) {
+        return t.slice(0, 4) + "-" + t.slice(4, 6) + "-" + t.slice(6, 8);
+      }
+      return t || "—";
+    }
+
+    const tokenEl = document.getElementById("token");
+    const btn = document.getElementById("btn");
+    const errEl = document.getElementById("err");
+    const tbody = document.getElementById("tbody");
+    const meta = document.getElementById("meta");
+    const resultPanel = document.getElementById("resultPanel");
+
+    try {
+      const saved = sessionStorage.getItem("gelenFaturalarIdToken");
+      if (saved) tokenEl.value = saved;
+    } catch (_) {}
+
+    btn.addEventListener("click", async () => {
+      errEl.hidden = true;
+      errEl.textContent = "";
+      const token = tokenEl.value.trim();
+      if (!token) {
+        errEl.textContent = "Firebase ID token gerekli.";
+        errEl.hidden = false;
+        return;
+      }
+      try {
+        sessionStorage.setItem("gelenFaturalarIdToken", token);
+      } catch (_) {}
+
+      btn.disabled = true;
+      try {
+        const r = await fetch("/api/listGelenBelgeleriExt?limit=10", {
+          headers: { Authorization: "Bearer " + token },
+        });
+        const text = await r.text();
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          throw new Error(text.slice(0, 200) || r.statusText);
+        }
+        if (!r.ok) {
+          throw new Error(data.error || text || r.statusText);
+        }
+
+        tbody.innerHTML = "";
+        const items = Array.isArray(data.items) ? data.items : [];
+        for (const it of items) {
+          const tr = document.createElement("tr");
+          const tutar = it.odenecekTutar != null ? String(it.odenecekTutar) : "—";
+          const cur = it.odenecekTutarDovizCinsi ? " " + it.odenecekTutarDovizCinsi : "";
+          tr.innerHTML =
+            "<td>" +
+            escapeHtml(it.belgeNo || "—") +
+            "</td><td>" +
+            escapeHtml(it.belgeSiraNo != null ? String(it.belgeSiraNo) : "—") +
+            "</td><td>" +
+            escapeHtml(formatBelgeTarih(it.belgeTarihi)) +
+            "</td><td>" +
+            escapeHtml(it.saticiUnvan || "—") +
+            '</td><td class="num">' +
+            escapeHtml(tutar + cur) +
+            "</td><td>" +
+            escapeHtml(formatGelis(it.faturaGelisTarihi)) +
+            "</td><td>" +
+            escapeHtml(it.ettn ? String(it.ettn).slice(0, 13) + "…" : "—") +
+            "</td>";
+          tbody.appendChild(tr);
+        }
+
+        meta.textContent =
+          "Kaynak: " +
+          (data.source || "—") +
+          " · onayDurum: " +
+          (data.onayDurum || "—") +
+          " · dönen: " +
+          (data.count != null ? data.count : items.length);
+        resultPanel.hidden = items.length === 0;
+        if (items.length === 0) {
+          errEl.textContent = "Liste boş (veya filtre sonucu yok).";
+          errEl.hidden = false;
+        }
+      } catch (e) {
+        errEl.textContent = e.message || String(e);
+        errEl.hidden = false;
+        resultPanel.hidden = true;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    function escapeHtml(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+  </script>
+</body>
+</html>
