@@ -1,0 +1,68 @@
+{
+  "project_info": {
+    "project_number": "741263300188",
+    "firebase_url": "https://curious-nucleus-392008-default-rtdb.europe-west1.firebasedatabase.app",
+    "project_id": "curious-nucleus-392008",
+    "storage_bucket": "curious-nucleus-392008.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:741263300188:android:0884014d38733299667899",
+        "android_client_info": {
+          "package_name": "com.company.myapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB9u6XJ8ss2l119_z9AMv0AxKZhMB5IsWo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:741263300188:android:a75754681c7ddd17667899",
+        "android_client_info": {
+          "package_name": "com.example.myapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB9u6XJ8ss2l119_z9AMv0AxKZhMB5IsWo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:741263300188:android:b74c285aae4f4157667899",
+        "android_client_info": {
+          "package_name": "com.gultextile.myapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyB9u6XJ8ss2l119_z9AMv0AxKZhMB5IsWo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
