@@ -1,0 +1,13 @@
+{
+  "folders": [
+    {
+      "name": "rose",
+      "path": "."
+    },
+    {
+      "name": "myapp",
+      "path": "myapp"
+    }
+  ],
+  "settings": {}
+}
