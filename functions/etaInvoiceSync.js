@@ -133,9 +133,53 @@ function collectInvoiceLineNotes(line) {
 function parseNum(v, def = 0) {
   if (v == null) return def;
   if (typeof v === "number") return Number.isFinite(v) ? v : def;
-  const s = String(v).trim().replaceAll(".", "").replaceAll(",", ".");
-  const n = Number(s);
+  const raw = String(v).trim();
+  if (!raw) return def;
+  const s = raw.replace(/\s+/g, "");
+  let normalized = s;
+  const commaIdx = s.lastIndexOf(",");
+  const dotIdx = s.lastIndexOf(".");
+  if (commaIdx >= 0 && dotIdx >= 0) {
+    if (commaIdx > dotIdx) {
+      // 1.234,56 -> 1234.56
+      normalized = s.replaceAll(".", "").replace(",", ".");
+    } else {
+      // 1,234.56 -> 1234.56
+      normalized = s.replaceAll(",", "");
+    }
+  } else if (commaIdx >= 0) {
+    // 1234,56 -> 1234.56
+    normalized = s.replace(",", ".");
+  } else {
+    // 1234.56 or 123456
+    normalized = s;
+  }
+  const n = Number(normalized);
   return Number.isFinite(n) ? n : def;
+}
+
+function parseExchangeRate(v, def = 1) {
+  if (v == null || v === "") return def;
+  if (typeof v === "number") {
+    return Number.isFinite(v) && v > 0 ? v : def;
+  }
+  const raw = String(v).trim();
+  if (!raw) return def;
+  const s = raw.replace(/\s+/g, "");
+  let normalized = s;
+  const commaIdx = s.lastIndexOf(",");
+  const dotIdx = s.lastIndexOf(".");
+  if (commaIdx >= 0 && dotIdx >= 0) {
+    if (commaIdx > dotIdx) {
+      normalized = s.replaceAll(".", "").replace(",", ".");
+    } else {
+      normalized = s.replaceAll(",", "");
+    }
+  } else if (commaIdx >= 0) {
+    normalized = s.replace(",", ".");
+  }
+  const n = Number(normalized);
+  return Number.isFinite(n) && n > 0 ? n : def;
 }
 
 function parseYmd(raw) {
@@ -383,6 +427,23 @@ function extractFirstIrsaliyeTarihi(data) {
   return extractFirstIrsaliyeTarihiFromRelated(data) || extractFirstIrsaliyeTarihiFromUbl(data);
 }
 
+function extractExchangeRateFromUbl(data) {
+  const up = data.ublParsed && typeof data.ublParsed === "object" ? data.ublParsed : {};
+  const inv = firstOf(up.Invoice);
+  if (!inv || typeof inv !== "object") return null;
+  const candidates = [
+    firstOf(inv.PricingExchangeRate),
+    firstOf(inv.PaymentExchangeRate),
+    firstOf(inv.TaxExchangeRate),
+  ].filter(Boolean);
+  for (const ex of candidates) {
+    const rateNode = ex?.CalculationRate ?? ex?.calculationRate ?? ex?.Rate ?? ex?.rate;
+    const n = parseNum(textNode(rateNode) || rateNode, 0);
+    if (n > 0) return n;
+  }
+  return null;
+}
+
 /**
  * `sp_Fatura_Kayit` FATFISIRSTAR / FATFISIRSNO alanlarını fatura tarihi/numarasına yazar ve
  * `@IrsaliyeNumaralari` parametresini kullanmaz. Bu güncelleme Firestore `relatedDespatches` + qnb irsaliye listesini yansıtır.
@@ -411,6 +472,63 @@ async function patchFatFisIrsaliyeAlanlari(wPool, fatFisRefNo, afterData) {
         FATFISIRSTAR = CASE WHEN @applyTar = 1 THEN @irstar ELSE FATFISIRSTAR END
       WHERE FATFISREFNO = @ref
     `);
+}
+
+async function patchCurrencyFields(wPool, fatFisRefNo, opts) {
+  const currencyCode = String(opts?.currencyCode || "").trim().toUpperCase();
+  const currencyType = String(opts?.currencyType || "MBNKSAT").trim().toUpperCase();
+  const kur = parseNum(opts?.dovizKuru, 1);
+  const isForeign = currencyCode && currencyCode !== "TRY" && kur > 0;
+  if (!isForeign) return;
+
+  const dovizGenTop = parseNum(opts?.docOdenecekTutar, 0);
+  const faturaTarihi = opts?.faturaTarihi instanceof Date ? opts.faturaTarihi : new Date();
+
+  await wPool
+    .request()
+    .input("ref", sql.Int, fatFisRefNo)
+    .input("kod", sql.NVarChar(10), currencyCode.slice(0, 10))
+    .input("tur", sql.NVarChar(20), currencyType.slice(0, 20))
+    .input("kur", sql.Decimal(18, 8), kur)
+    .input("dovTop", sql.Decimal(18, 4), dovizGenTop)
+    .input("dovTar", sql.DateTime, faturaTarihi)
+    .query(`
+      UPDATE dbo.FATFIS
+      SET
+        FATFISDOVKOD = @kod,
+        FATFISDOVTUR = @tur,
+        FATFISDOVKUR = @kur,
+        FATFISDOVTAR = @dovTar,
+        FATFISGENDOVTOP = @dovTop
+      WHERE FATFISREFNO = @ref
+    `);
+
+  const lines = Array.isArray(opts?.lineCurrency) ? opts.lineCurrency : [];
+  for (const ln of lines) {
+    const sira = Number(ln?.sira || 0);
+    if (!Number.isFinite(sira) || sira <= 0) continue;
+    const dovFiyat = parseNum(ln?.dovFiyat, 0);
+    const dovTutar = parseNum(ln?.dovTutar, 0);
+    await wPool
+      .request()
+      .input("ref", sql.Int, fatFisRefNo)
+      .input("sira", sql.Int, sira)
+      .input("kod", sql.NVarChar(10), currencyCode.slice(0, 10))
+      .input("tur", sql.NVarChar(20), currencyType.slice(0, 20))
+      .input("kur", sql.Decimal(18, 8), kur)
+      .input("fyt", sql.Decimal(18, 6), dovFiyat)
+      .input("tut", sql.Decimal(18, 4), dovTutar)
+      .query(`
+        UPDATE dbo.FATHAR
+        SET
+          FATHARDOVKOD = @kod,
+          FATHARDOVTUR = @tur,
+          FATHARDOVKUR = @kur,
+          FATHARDOVFIYAT = @fyt,
+          FATHARDOVTUTAR = @tut
+        WHERE FATHARREFNO = @ref AND FATHARSIRANO = @sira
+      `);
+  }
 }
 
 async function loadDefaults(rPool, wPool) {
@@ -744,11 +862,17 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   const faturaTarihi = parseYmd(q.belgeTarihi || afterData.belgeTarihi);
   const vadeTarihi = q.vadeTarihi ? parseYmd(q.vadeTarihi) : faturaTarihi;
   const paraBirimi = String(q.odenecekTutarDovizCinsi || q.paraBirimi || "TRY").trim() || "TRY";
-  const dovizKuru = parseNum(q.dovizKuru, 1);
-  const malHizmetToplamTutari = usableLines.reduce((s, x) => s + (x.net || 0), 0);
+  const ublDovizKuru = extractExchangeRateFromUbl(afterData);
+  const dovizKuru = parseExchangeRate(q.dovizKuru ?? ublDovizKuru, 1);
+  const isForeignCurrency = upper(paraBirimi) !== "TRY";
+  const effectiveDovizKuru = isForeignCurrency && dovizKuru > 0 ? dovizKuru : 1;
+  const docMalHizmetToplamTutari = usableLines.reduce((s, x) => s + (x.net || 0), 0);
   const toplamIskonto = 0;
-  const vergiTutari = usableLines.reduce((s, x) => s + (x.taxAmount || 0), 0);
-  const odenecekTutar = parseNum(q.odenecekTutar, malHizmetToplamTutari + vergiTutari);
+  const docVergiTutari = usableLines.reduce((s, x) => s + (x.taxAmount || 0), 0);
+  const docOdenecekTutar = parseNum(q.odenecekTutar, docMalHizmetToplamTutari + docVergiTutari);
+  const malHizmetToplamTutari = docMalHizmetToplamTutari * effectiveDovizKuru;
+  const vergiTutari = docVergiTutari * effectiveDovizKuru;
+  const odenecekTutar = docOdenecekTutar * effectiveDovizKuru;
   const tevkifatTutar = parseNum(q.tevkifatTutari, 0);
   const tevkifatOrani = parseNum(q.tevkifatOrani, 0);
   const tevkifatKodu = String(q.tevkifatKodu || "").trim();
@@ -770,6 +894,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   const invoiceTypeCode = String(q.faturaTipi || cls.invType || "").trim();
   const irsaliyeNumaralari = extractIrsaliyeNumaralari(afterData);
   const lineMatches = [];
+  const lineCurrency = [];
 
   let fatFisRefNo = existingRef || null;
   let stokFisRefNo = existingStokRef || 0;
@@ -880,9 +1005,16 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     const unitPrice = parseNum(l.unitPrice, 0);
     const taxPercent = parseNum(l.taxPercent, 0);
     const taxAmount = parseNum(l.taxAmount, 0);
+    const unitPriceForSp = isForeignCurrency ? unitPrice * effectiveDovizKuru : unitPrice;
+    const taxAmountForSp = isForeignCurrency ? taxAmount * effectiveDovizKuru : taxAmount;
     const lineAcik = String(l.lineAciklama || "").trim();
     const satirNotu = lineAcik.slice(0, 50);
     const satirAcik = lineAcik.slice(0, 255);
+    lineCurrency.push({
+      sira: i + 1,
+      dovFiyat: unitPrice,
+      dovTutar: parseNum(l.net, qty * unitPrice),
+    });
 
     const dr = wPool.request();
     dr.input("FatFisRefNo", sql.Int, fatFisRefNo);
@@ -897,7 +1029,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     dr.input("ErpUrunKodu", sql.NVarChar(255), itemCode);
     dr.input("MalHizmetMiktar", sql.Decimal(18, 4), qty);
     dr.input("BirimKodu", sql.NVarChar(10), String(l.unit || "AD").slice(0, 10));
-    dr.input("BirimFiyat", sql.Decimal(18, 6), unitPrice);
+    dr.input("BirimFiyat", sql.Decimal(18, 6), unitPriceForSp);
 
     for (let k = 1; k <= 6; k++) {
       dr.input(`IskontoOrani${k}`, sql.Decimal(18, 4), 0);
@@ -906,7 +1038,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
       dr.input(`FaturaAltiIskontoTutari${k}`, sql.Decimal(18, 4), 0);
     }
     dr.input("VergiOrani", sql.Decimal(18, 6), taxPercent);
-    dr.input("VergiTutari", sql.Decimal(18, 6), taxAmount);
+    dr.input("VergiTutari", sql.Decimal(18, 6), taxAmountForSp);
     dr.input("OtvOrani", sql.Decimal(18, 4), 0);
     dr.input("OtvTutari", sql.Decimal(18, 4), 0);
     dr.input("SatirNotu", sql.NVarChar(50), satirNotu);
@@ -938,6 +1070,13 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   }
 
   await patchFatFisIrsaliyeAlanlari(wPool, fatFisRefNo, afterData);
+  await patchCurrencyFields(wPool, fatFisRefNo, {
+    currencyCode: paraBirimi,
+    dovizKuru: effectiveDovizKuru,
+    docOdenecekTutar,
+    faturaTarihi,
+    lineCurrency,
+  });
 
   await wPool.request().input("FatFisRefNo", sql.Int, fatFisRefNo).execute("dbo.sp_FatFisToplam_Kayit");
 
