@@ -74,6 +74,7 @@ export const onQnbInvoiceApproved = onDocumentUpdated(
           etaKayitDetay: {
             status: result.status || "ok",
             lineCount: result.lineCount || 0,
+            muhasebeRefFatFisRefNo: result.muhasebeRefFatFisRefNo || 0,
             lineMatches: Array.isArray(result.lineMatches) ? result.lineMatches : [],
           },
           etaKayitHata: FieldValue.delete(),

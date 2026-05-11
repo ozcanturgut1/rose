@@ -6,6 +6,7 @@ let writePoolPromise = null;
 let cachedDefaults = null;
 let validatedWriteProcedures = false;
 let cachedStkkartColumnNames = null;
+let validatedDenemeMuhasebeProcedure = false;
 
 function sqlConfig(database) {
   const t = resolveSqlTargets();
@@ -61,6 +62,36 @@ async function ensureWriteProcedures(pool) {
     );
   }
   validatedWriteProcedures = true;
+}
+
+async function ensureDenemeMuhasebeProcedure(pool) {
+  if (validatedDenemeMuhasebeProcedure) return;
+  const rs = await pool
+    .request()
+    .query("SELECT TOP 1 name FROM sys.procedures WHERE name='sp_Fatura_Muhasebe_Bagla_Deneme'");
+  if (!rs.recordset.length) {
+    const dbName = resolveSqlTargets().writeDb;
+    throw new Error(`Write DB '${dbName}' missing procedure: sp_Fatura_Muhasebe_Bagla_Deneme`);
+  }
+  validatedDenemeMuhasebeProcedure = true;
+}
+
+async function tryAutoMuhasebeForDeneme(wPool, fatFisRefNo, opts) {
+  const writeDb = String(resolveSqlTargets().writeDb || "").trim().toLowerCase();
+  const isDeneme = writeDb === "eta_deneme_2026";
+  const enabled = String(process.env.ETA_DENEME_AUTO_MUHASEBE ?? "1").trim() !== "0";
+  if (!isDeneme || !enabled) return;
+  await ensureDenemeMuhasebeProcedure(wPool);
+  const req = wPool.request();
+  req.input("FatFisRefNo", sql.Int, fatFisRefNo);
+  const refFatFisRefNo = Number(opts?.refFatFisRefNo || 0);
+  req.input(
+    "RefFatFisRefNo",
+    sql.Int,
+    Number.isFinite(refFatFisRefNo) && refFatFisRefNo > 0 ? refFatFisRefNo : null
+  );
+  req.output("MuhFisRefNo", sql.Int);
+  await req.execute("dbo.sp_Fatura_Muhasebe_Bagla_Deneme");
 }
 
 function norm(s) {
@@ -201,6 +232,16 @@ function normalizeMatchText(s) {
     .toLowerCase()
     .replaceAll("ı", "i")
     .replaceAll("İ", "i")
+    .replaceAll("ğ", "g")
+    .replaceAll("Ğ", "g")
+    .replaceAll("ü", "u")
+    .replaceAll("Ü", "u")
+    .replaceAll("ş", "s")
+    .replaceAll("Ş", "s")
+    .replaceAll("ö", "o")
+    .replaceAll("Ö", "o")
+    .replaceAll("ç", "c")
+    .replaceAll("Ç", "c")
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -248,8 +289,9 @@ function codeSimilarity(a, b) {
 }
 
 function scoreHistoricalMatch(targetLine, candidateLine) {
-  const satirAcik = String(targetLine.lineAciklama ?? targetLine.description ?? "").trim();
-  const stokCinsiTxt = String(targetLine.stokCinsi ?? "").trim();
+  const itemNameTxt = String(targetLine.itemCode ?? "").trim();
+  const satirAcik = String(targetLine.lineAciklama ?? targetLine.description ?? itemNameTxt).trim();
+  const stokCinsiTxt = String(targetLine.stokCinsi ?? itemNameTxt).trim();
   const descScore = jaccardSimilarity(satirAcik, candidateLine.description);
   const codeScore = codeSimilarity(targetLine.itemCode, candidateLine.stkKod);
   const cinsiScore = jaccardSimilarity(stokCinsiTxt, candidateLine.stkCinsi);
@@ -269,7 +311,10 @@ function scoreHistoricalMatch(targetLine, candidateLine) {
 
 function classifyInvoiceType(data) {
   const q = data.qnbRaw && typeof data.qnbRaw === "object" ? data.qnbRaw : {};
-  const invType = upper(q.faturaTipi || q.invoiceTypeCode || data.invoiceTypeCode || "");
+  const up = data.ublParsed && typeof data.ublParsed === "object" ? data.ublParsed : {};
+  const inv = firstOf(up.Invoice);
+  const ublInvoiceTypeCode = textNode(inv?.InvoiceTypeCode).trim();
+  const invType = upper(q.faturaTipi || q.invoiceTypeCode || data.invoiceTypeCode || ublInvoiceTypeCode || "");
   const hasTevkifat = parseNum(q.tevkifatTutari ?? data.tevkifatTutari, 0) > 0 || invType.includes("TEVK");
   const isIade = invType.includes("IADE") || invType.includes("RETURN") || invType.includes("CREDIT");
   const isIstisna = invType.includes("ISTISNA") || invType.includes("EXEMPT");
@@ -278,25 +323,17 @@ function classifyInvoiceType(data) {
 
 async function resolveErpFaturaTipNo(pool, cls) {
   const req = pool.request();
-  const like = (v) => `%${v}%`;
   if (cls.isIade) {
     const r = await req.query(
       "SELECT TOP 1 FATFTNO FROM dbo.FATFISTIP WITH (NOLOCK) WHERE UPPER(FATFTKOD) LIKE UPPER('%IADE%') ORDER BY FATFTNO"
     );
     if (r.recordset.length) return r.recordset[0].FATFTNO;
   }
-  if (cls.hasTevkifat) {
-    const r = await pool
-      .request()
-      .query("SELECT TOP 1 FATFTNO FROM dbo.FATFISTIP WITH (NOLOCK) WHERE UPPER(FATFTKOD) LIKE UPPER('%TEVK%') ORDER BY FATFTNO");
-    if (r.recordset.length) return r.recordset[0].FATFTNO;
-  }
-  if (cls.isIstisna) {
-    const r = await pool
-      .request()
-      .query("SELECT TOP 1 FATFTNO FROM dbo.FATFISTIP WITH (NOLOCK) WHERE UPPER(FATFTKOD) LIKE UPPER('%YURT DI%ALIM%') ORDER BY FATFTNO");
-    if (r.recordset.length) return r.recordset[0].FATFTNO;
-  }
+
+  // NOTE:
+  // ETA'daki mevcut sp_Fatura_Kayit prosedürü cari bakiye güncellemesinde yalnızca
+  // ALIM / GIDER / ALIM IADE tiplerini destekliyor. TEVKIFATLI ALIS veya YURT DISI ALIM
+  // gibi tipler Tanimsiz Fatura Tipi hatasına düşebildiği için, alış akışında güvenli varsayılan ALIM.
   const r = await pool
     .request()
     .query("SELECT TOP 1 FATFTNO FROM dbo.FATFISTIP WITH (NOLOCK) WHERE UPPER(FATFTKOD)='ALIM' ORDER BY FATFTNO");
@@ -314,16 +351,18 @@ function extractInvoiceLines(data) {
     const line = ln && typeof ln === "object" ? ln : {};
     const item = firstOf(line.Item) || {};
     const nameKod = textNode(item.Name).trim();
-    const sellerId = textNode(item.SellersItemIdentification?.ID).trim();
-    const buyerId = textNode(item.BuyersItemIdentification?.ID).trim();
-    /** UBL `cbc:Name` → ETA stok kodu (STKKOD); boşsa satıcı/alıcı kalemi id. */
-    const itemCode = (nameKod || sellerId || buyerId).slice(0, 40);
-    const descParts = collectItemDescriptions(item);
-    /** UBL `cbc:Description` (Item) → stok cinsi. */
-    const stokCinsi = descParts.length ? descParts.join(" | ") : "";
     const noteParts = collectInvoiceLineNotes(line);
-    /** UBL `cbc:Note` (InvoiceLine) → satır açıklaması. */
-    const lineAciklama = noteParts.length ? noteParts.join(" | ") : "";
+    const noteKod = noteParts.length ? noteParts.join(" | ") : "";
+    /** UBL `cbc:Name` → ETA stok kodu (STKKOD); boşsa `InvoiceLine.Note`. */
+    const itemCode = (nameKod || noteKod).slice(0, 40);
+    /** UBL `cbc:Note` (InvoiceLine) + `cbc:Name` (Item) → satır açıklaması. */
+    const lineAciklamaParts = [];
+    if (noteKod) lineAciklamaParts.push(noteKod);
+    if (nameKod) lineAciklamaParts.push(nameKod);
+    const lineAciklama = lineAciklamaParts.join(" | ");
+    const descParts = collectItemDescriptions(item);
+    /** UBL `cbc:Description` (Item) → stok cinsi. Boşsa `InvoiceLine.Note` fallback. */
+    const stokCinsi = (descParts.length ? descParts.join(" | ") : lineAciklama).trim();
     const qtyNode = firstOf(line.InvoicedQuantity);
     const qty = parseNum(textNode(qtyNode), 1);
     const unit = (qtyNode && typeof qtyNode === "object" ? qtyNode["@_unitCode"] : null) || "AD";
@@ -442,6 +481,81 @@ function extractExchangeRateFromUbl(data) {
     if (n > 0) return n;
   }
   return null;
+}
+
+function getInvoiceNodeFromUbl(data) {
+  const up = data?.ublParsed && typeof data.ublParsed === "object" ? data.ublParsed : {};
+  const inv = firstOf(up.Invoice);
+  return inv && typeof inv === "object" ? inv : null;
+}
+
+function extractCurrencyCodeFromUbl(data) {
+  const inv = getInvoiceNodeFromUbl(data);
+  if (!inv) return "";
+  return String(textNode(inv.DocumentCurrencyCode) || "").trim().toUpperCase();
+}
+
+function extractProfileFromUbl(data) {
+  const inv = getInvoiceNodeFromUbl(data);
+  if (!inv) return "";
+  return String(textNode(inv.ProfileID) || textNode(inv.CustomizationID) || "").trim();
+}
+
+function extractWithholdingFromUbl(data) {
+  const inv = getInvoiceNodeFromUbl(data);
+  if (!inv) return { tevkifatTutar: null, tevkifatOrani: null, tevkifatKodu: "" };
+  const wt = firstOf(inv.WithholdingTaxTotal);
+  if (!wt || typeof wt !== "object") return { tevkifatTutar: null, tevkifatOrani: null, tevkifatKodu: "" };
+  const tevkifatTutar = parseNum(textNode(firstOf(wt.TaxAmount)), 0);
+  const sub = firstOf(wt.TaxSubtotal);
+  const tevkifatOrani = sub ? parseNum(textNode(firstOf(sub.Percent)), 0) : 0;
+  const cat = firstOf(sub?.TaxCategory);
+  const sch = firstOf(cat?.TaxScheme);
+  const tevkifatKodu = String(textNode(firstOf(sch?.TaxTypeCode)) || textNode(firstOf(sch?.Name)) || "").trim();
+  return {
+    tevkifatTutar: tevkifatTutar > 0 ? tevkifatTutar : null,
+    tevkifatOrani: tevkifatOrani > 0 ? tevkifatOrani : null,
+    tevkifatKodu,
+  };
+}
+
+function extractOtvFromUbl(data) {
+  const inv = getInvoiceNodeFromUbl(data);
+  if (!inv) return null;
+  const taxTotalsRaw = inv.TaxTotal;
+  const taxTotals = Array.isArray(taxTotalsRaw) ? taxTotalsRaw : taxTotalsRaw ? [taxTotalsRaw] : [];
+  let sum = 0;
+  for (const tt of taxTotals) {
+    const subsRaw = tt?.TaxSubtotal;
+    const subs = Array.isArray(subsRaw) ? subsRaw : subsRaw ? [subsRaw] : [];
+    for (const s of subs) {
+      const cat = firstOf(s?.TaxCategory);
+      const sch = firstOf(cat?.TaxScheme);
+      const taxTypeCode = upper(textNode(firstOf(sch?.TaxTypeCode)));
+      const taxName = upper(textNode(firstOf(sch?.Name)));
+      const isOtv = taxTypeCode === "0071" || taxName.includes("OTV") || taxName.includes("OZEL TUKETIM");
+      if (!isOtv) continue;
+      sum += parseNum(textNode(firstOf(s.TaxAmount)), 0);
+    }
+  }
+  return sum > 0 ? sum : null;
+}
+
+function extractIstisnaFromUbl(data) {
+  const inv = getInvoiceNodeFromUbl(data);
+  if (!inv) return "";
+  const taxTotalsRaw = inv.TaxTotal;
+  const taxTotals = Array.isArray(taxTotalsRaw) ? taxTotalsRaw : taxTotalsRaw ? [taxTotalsRaw] : [];
+  for (const tt of taxTotals) {
+    const subsRaw = tt?.TaxSubtotal;
+    const subs = Array.isArray(subsRaw) ? subsRaw : subsRaw ? [subsRaw] : [];
+    for (const s of subs) {
+      const cat = firstOf(s?.TaxCategory);
+      const reason = String(textNode(firstOf(cat?.TaxExemptionReason)) || textNode(firstOf(cat?.TaxExemptionReasonCode)) || "").trim();
+      if (reason) return reason;
+    }
+  }
+  return "";
 }
 
 /**
@@ -643,8 +757,10 @@ async function tryCloneStkkartFromTemplate(wPool, newKod, stkcinsi, birim, templ
 async function findStockCodeBySupplierHistory(rPool, opts) {
   const supplierVkn = String(opts?.supplierVkn || "").replace(/\D/g, "");
   const line = opts?.line || {};
+  const invoiceClass = opts?.invoiceClass || {};
+  const invoiceCurrency = String(opts?.currencyCode || "").trim().toUpperCase();
   if (!supplierVkn) return null;
-  const targetDesc = String(line.description || "").trim();
+  const targetDesc = String(line.description || line.lineAciklama || line.stokCinsi || line.itemCode || "").trim();
   if (!targetDesc) return null;
 
   const lookbackMonths = Number(process.env.ETA_MATCH_LOOKBACK_MONTHS || 12);
@@ -658,25 +774,61 @@ async function findStockCodeBySupplierHistory(rPool, opts) {
   const carkod = String(cariRs.recordset[0]?.CARKOD || "").trim();
   if (!carkod) return null;
 
-  const req = rPool.request();
-  req.input("carkod", sql.NVarChar(40), carkod);
-  req.input("lookbackMonths", sql.Int, Number.isFinite(lookbackMonths) ? lookbackMonths : 12);
-  req.input("candidateLimit", sql.Int, Number.isFinite(candidateLimit) ? candidateLimit : 300);
+  const makeCandidates = async (mode) => {
+    const req = rPool.request();
+    req.input("carkod", sql.NVarChar(40), carkod);
+    req.input("lookbackMonths", sql.Int, Number.isFinite(lookbackMonths) ? lookbackMonths : 12);
+    req.input("candidateLimit", sql.Int, Number.isFinite(candidateLimit) ? candidateLimit : 300);
+    req.input("isIade", sql.Bit, invoiceClass?.isIade ? 1 : 0);
+    req.input("hasTevkifat", sql.Bit, invoiceClass?.hasTevkifat ? 1 : 0);
+    req.input("isIstisna", sql.Bit, invoiceClass?.isIstisna ? 1 : 0);
+    req.input("dovKod", sql.NVarChar(10), invoiceCurrency || "");
+    req.input("applyType", sql.Bit, mode === "strict" || mode === "type_only" ? 1 : 0);
+    req.input("applyCurrency", sql.Bit, mode === "strict" ? 1 : 0);
+    const rs = await req.query(`
+      SELECT TOP (@candidateLimit)
+        F.FATFISREFNO AS FATFISREFNO,
+        ISNULL(F.FATFISMUHREFNO, 0) AS MUHREFNO,
+        ISNULL(F.FATFISTIPI, 0) AS FATTIP,
+        CASE WHEN ISNULL(F.FATFISTEVTUTAR, 0) > 0 THEN 1 ELSE 0 END AS HAS_TEV,
+        CASE WHEN ISNULL(F.FATFISTIPI, 0) IN (2,4,6) THEN 1 ELSE 0 END AS IS_IADE,
+        CASE WHEN ISNULL(F.FATFISTIPI, 0) IN (11) THEN 1 ELSE 0 END AS IS_ISTISNA,
+        ISNULL(F.FATFISMALTOP, 0) AS MALTOP,
+        ISNULL(F.FATFISGENTOPLAM, 0) AS GENTOP,
+        ISNULL(NULLIF(LTRIM(RTRIM(F.FATFISDOVKOD)), ''), 'TRY') AS DOVKOD,
+        ISNULL(F.FATFISDOVKUR, 1) AS DOVKUR,
+        H.FATHARSTKKOD AS STKKOD,
+        ISNULL(H.FATHARSTKCINS,'') AS STKCINSI,
+        ISNULL(H.FATHARACIKLAMA,'') AS ACIKLAMA
+      FROM dbo.FATHAR H WITH (NOLOCK)
+      INNER JOIN dbo.FATFIS F WITH (NOLOCK) ON F.FATFISREFNO = H.FATHARREFNO
+      WHERE F.FATFISCARKOD = @carkod
+        AND ISNULL(H.FATHARSTKKOD, '') <> ''
+        AND (
+          ISNULL(H.FATHARACIKLAMA, '') <> ''
+          OR ISNULL(H.FATHARSTKCINS, '') <> ''
+        )
+        AND (
+          @applyType = 0 OR (
+            (CASE WHEN ISNULL(F.FATFISTEVTUTAR, 0) > 0 THEN 1 ELSE 0 END) = @hasTevkifat
+            AND (CASE WHEN ISNULL(F.FATFISTIPI, 0) IN (11) THEN 1 ELSE 0 END) = @isIstisna
+            AND (CASE WHEN ISNULL(F.FATFISTIPI, 0) IN (2,4,6) THEN 1 ELSE 0 END) = @isIade
+          )
+        )
+        AND (
+          @applyCurrency = 0 OR (
+            UPPER(ISNULL(NULLIF(LTRIM(RTRIM(F.FATFISDOVKOD)), ''), 'TRY')) = UPPER(ISNULL(NULLIF(@dovKod, ''), 'TRY'))
+          )
+        )
+      ORDER BY H.FATHARREFNO DESC
+    `);
+    return rs.recordset || [];
+  };
 
-  const rs = await req.query(`
-    SELECT TOP (@candidateLimit)
-      H.FATHARSTKKOD AS STKKOD,
-      ISNULL(H.FATHARSTKCINS,'') AS STKCINSI,
-      ISNULL(H.FATHARACIKLAMA,'') AS ACIKLAMA
-    FROM dbo.FATHAR H WITH (NOLOCK)
-    INNER JOIN dbo.FATFIS F WITH (NOLOCK) ON F.FATFISREFNO = H.FATHARREFNO
-    WHERE F.FATFISCARKOD = @carkod
-      AND ISNULL(H.FATHARSTKKOD, '') <> ''
-      AND ISNULL(H.FATHARACIKLAMA, '') <> ''
-    ORDER BY H.FATHARREFNO DESC
-  `);
-
-  const rows = rs.recordset || [];
+  // strict: type + currency, type_only: only invoice class, loose: only supplier history
+  let rows = await makeCandidates("strict");
+  if (!rows.length) rows = await makeCandidates("type_only");
+  if (!rows.length) rows = await makeCandidates("loose");
   if (!rows.length) return null;
 
   const stkFreq = new Map();
@@ -690,7 +842,7 @@ async function findStockCodeBySupplierHistory(rPool, opts) {
   let best = null;
   for (const row of rows) {
     const scored = scoreHistoricalMatch(line, {
-      description: row.ACIKLAMA,
+      description: String(row.ACIKLAMA || row.STKCINSI || row.STKKOD || "").trim(),
       stkKod: row.STKKOD,
       stkCinsi: row.STKCINSI,
       unit: null,
@@ -716,12 +868,19 @@ async function findStockCodeBySupplierHistory(rPool, opts) {
   }
 
   if (!best?.stkkod) return null;
-  const minScore = parseNum(process.env.ETA_MATCH_MIN_SCORE, 0.62);
-  const minDesc = parseNum(process.env.ETA_MATCH_MIN_DESC_SCORE, 0.5);
-  if (best.total < minScore || best.descScore < minDesc) return null;
   return {
     stkkod: best.stkkod,
     stkcinsi: best.stkcinsi,
+    refFatFisRefNo: Number(best.row?.FATFISREFNO || 0) || 0,
+    refMuhRefNo: Number(best.row?.MUHREFNO || 0) || 0,
+    refFatTip: Number(best.row?.FATTIP || 0) || 0,
+    refHasTevkifat: Number(best.row?.HAS_TEV || 0) > 0,
+    refIsIade: Number(best.row?.IS_IADE || 0) > 0,
+    refIsIstisna: Number(best.row?.IS_ISTISNA || 0) > 0,
+    refMalTop: parseNum(best.row?.MALTOP, 0),
+    refGenTop: parseNum(best.row?.GENTOP, 0),
+    refDovKod: String(best.row?.DOVKOD || "").trim(),
+    refDovKur: parseNum(best.row?.DOVKUR, 1),
     score: Number(best.total.toFixed(4)),
     baseScore: Number(best.baseScore.toFixed(4)),
     descScore: Number(best.descScore.toFixed(4)),
@@ -861,7 +1020,8 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
 
   const faturaTarihi = parseYmd(q.belgeTarihi || afterData.belgeTarihi);
   const vadeTarihi = q.vadeTarihi ? parseYmd(q.vadeTarihi) : faturaTarihi;
-  const paraBirimi = String(q.odenecekTutarDovizCinsi || q.paraBirimi || "TRY").trim() || "TRY";
+  const ublCurrencyCode = extractCurrencyCodeFromUbl(afterData);
+  const paraBirimi = String(q.odenecekTutarDovizCinsi || q.paraBirimi || ublCurrencyCode || "").trim().toUpperCase();
   const ublDovizKuru = extractExchangeRateFromUbl(afterData);
   const dovizKuru = parseExchangeRate(q.dovizKuru ?? ublDovizKuru, 1);
   const isForeignCurrency = upper(paraBirimi) !== "TRY";
@@ -873,14 +1033,18 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   const malHizmetToplamTutari = docMalHizmetToplamTutari * effectiveDovizKuru;
   const vergiTutari = docVergiTutari * effectiveDovizKuru;
   const odenecekTutar = docOdenecekTutar * effectiveDovizKuru;
-  const tevkifatTutar = parseNum(q.tevkifatTutari, 0);
-  const tevkifatOrani = parseNum(q.tevkifatOrani, 0);
-  const tevkifatKodu = String(q.tevkifatKodu || "").trim();
-  const otvTutar = parseNum(q.otvTutari, 0);
+  const ublWithholding = extractWithholdingFromUbl(afterData);
+  const tevkifatTutar = parseNum(q.tevkifatTutari ?? afterData?.tevkifatTutari ?? ublWithholding.tevkifatTutar, 0);
+  const tevkifatOrani = parseNum(q.tevkifatOrani ?? afterData?.tevkifatOrani ?? ublWithholding.tevkifatOrani, 0);
+  const tevkifatKodu = String(q.tevkifatKodu || afterData?.tevkifatKodu || ublWithholding.tevkifatKodu || "").trim();
+  const ublOtvTutar = extractOtvFromUbl(afterData);
+  const otvTutar = parseNum(q.otvTutari ?? afterData?.otvTutari ?? ublOtvTutar, 0);
   const not1 = String(afterData.onayAciklamaMuhasebe || "").trim();
   const not2 = String(afterData.onayAciklamaNihaiOnay || "").trim();
   const not3 = String(afterData.onayAciklamaAraOnay || "").trim();
-  const istisna = String(q.vergiIstisnaMuafiyetSebebi || "").trim();
+  const istisna = String(
+    q.vergiIstisnaMuafiyetSebebi || afterData?.vergiIstisnaMuafiyetSebebi || extractIstisnaFromUbl(afterData) || ""
+  ).trim();
 
   const stkTopBtut = malHizmetToplamTutari;
   const stkTopIsk = toplamIskonto;
@@ -890,11 +1054,12 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   const stkTopOtut = otvTutar;
 
   const connectorUser = (process.env.ETA_CONNECTOR_USER || "YMM").trim();
-  const profile = String(q.faturaProfili || "TEMELFATURA").trim();
+  const profile = String(q.faturaProfili || afterData?.faturaProfili || extractProfileFromUbl(afterData) || "TEMELFATURA").trim();
   const invoiceTypeCode = String(q.faturaTipi || cls.invType || "").trim();
   const irsaliyeNumaralari = extractIrsaliyeNumaralari(afterData);
   const lineMatches = [];
   const lineCurrency = [];
+  let refFatFisForMuhasebe = 0;
 
   let fatFisRefNo = existingRef || null;
   let stokFisRefNo = existingStokRef || 0;
@@ -953,15 +1118,58 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   for (let i = 0; i < usableLines.length; i++) {
     const l = usableLines[i];
     const rawItemCode = String(l.itemCode || "").trim().slice(0, 40);
-    let itemCodeResolved = await resolveWriteStockCodeExact(wPool, rawItemCode);
-    let matchSource = itemCodeResolved ? "direct_item_code" : null;
-    const historyMatch =
-      !itemCodeResolved && supplierVkn
-        ? await findStockCodeBySupplierHistory(rPool, { supplierVkn, line: l })
-        : null;
-    if (!itemCodeResolved && historyMatch?.stkkod) {
-      itemCodeResolved = historyMatch.stkkod;
-      matchSource = "supplier_history_match";
+    let itemCodeResolved = null;
+    let matchSource = null;
+    const historyMatch = supplierVkn
+      ? await findStockCodeBySupplierHistory(rPool, {
+          supplierVkn,
+          line: l,
+          invoiceClass: cls,
+          currencyCode: paraBirimi,
+        })
+      : null;
+    if (!refFatFisForMuhasebe && historyMatch?.refFatFisRefNo) {
+      // Reference invoice for accounting pattern (DENEME only). Apply tevkifat threshold compatibility if needed.
+      const limit = parseNum(process.env.ETA_TEVKIFAT_LIMIT_TL, 12000);
+      const newMalTl = malHizmetToplamTutari; // already scaled to TL by effectiveDovizKuru
+      let refMalTl = parseNum(historyMatch.refMalTop, 0);
+      const refDov = String(historyMatch.refDovKod || "").trim().toUpperCase();
+      const refKur = parseNum(historyMatch.refDovKur, 1);
+      if (refDov && refDov !== "TRY" && refKur > 0) refMalTl = refMalTl * refKur;
+      const sameClass =
+        Boolean(historyMatch.refHasTevkifat) === Boolean(cls?.hasTevkifat) &&
+        Boolean(historyMatch.refIsIade) === Boolean(cls?.isIade) &&
+        Boolean(historyMatch.refIsIstisna) === Boolean(cls?.isIstisna);
+      const newBucket = cls?.hasTevkifat ? (newMalTl >= limit ? "GE" : "LT") : "NA";
+      const refBucket = cls?.hasTevkifat ? (refMalTl >= limit ? "GE" : "LT") : "NA";
+      if (sameClass && (!cls?.hasTevkifat || newBucket === refBucket)) {
+        refFatFisForMuhasebe = Number(historyMatch.refFatFisRefNo || 0) || 0;
+      }
+    }
+    if (historyMatch?.stkkod) {
+      const historyCode = String(historyMatch.stkkod || "").trim().slice(0, 40);
+      itemCodeResolved = await resolveWriteStockCodeExact(wPool, historyCode);
+      if (itemCodeResolved) {
+        matchSource = "supplier_history_match";
+      } else if (historyCode && allowAutoStk) {
+        try {
+          await tryCloneStkkartFromTemplate(
+            wPool,
+            historyCode,
+            String(historyMatch.stkcinsi || l.stokCinsi || historyCode).trim() || historyCode,
+            l.unit,
+            stkTemplate
+          );
+        } catch {
+          /* duplicate / şema */
+        }
+        itemCodeResolved = await resolveWriteStockCodeExact(wPool, historyCode);
+        if (itemCodeResolved) matchSource = "supplier_history_clone";
+      }
+    }
+    if (!itemCodeResolved) {
+      itemCodeResolved = await resolveWriteStockCodeExact(wPool, rawItemCode);
+      if (itemCodeResolved) matchSource = "direct_item_code";
     }
     if (!itemCodeResolved && rawItemCode && allowAutoStk) {
       try {
@@ -1008,8 +1216,9 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     const unitPriceForSp = isForeignCurrency ? unitPrice * effectiveDovizKuru : unitPrice;
     const taxAmountForSp = isForeignCurrency ? taxAmount * effectiveDovizKuru : taxAmount;
     const lineAcik = String(l.lineAciklama || "").trim();
-    const satirNotu = lineAcik.slice(0, 50);
-    const satirAcik = lineAcik.slice(0, 255);
+    const satirAcikSrc = String(lineAcik || l.stokCinsi || l.itemCode || "HIZMET").trim();
+    const satirNotu = satirAcikSrc.slice(0, 50);
+    const satirAcik = satirAcikSrc.slice(0, 255);
     lineCurrency.push({
       sira: i + 1,
       dovFiyat: unitPrice,
@@ -1079,6 +1288,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   });
 
   await wPool.request().input("FatFisRefNo", sql.Int, fatFisRefNo).execute("dbo.sp_FatFisToplam_Kayit");
+  await tryAutoMuhasebeForDeneme(wPool, fatFisRefNo, { refFatFisRefNo: refFatFisForMuhasebe });
 
   const verify = await wPool
     .request()
@@ -1091,6 +1301,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     fatFisRefNo,
     stokFisRefNo,
     muhFisRefNo: verify.recordset[0]?.FATFISMUHREFNO || 0,
+    muhasebeRefFatFisRefNo: refFatFisForMuhasebe || 0,
     lineCount: usableLines.length,
     lineMatches,
   };

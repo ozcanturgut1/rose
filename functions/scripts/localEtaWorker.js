@@ -43,6 +43,7 @@ async function processDoc(db, docSnap) {
           status: result.status || "ok",
           lineCount: result.lineCount || 0,
           localWorker: true,
+          muhasebeRefFatFisRefNo: result.muhasebeRefFatFisRefNo || 0,
           lineMatches: Array.isArray(result.lineMatches) ? result.lineMatches : [],
         },
         etaKayitHata: FieldValue.delete(),
