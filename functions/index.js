@@ -26,6 +26,7 @@ import { backfillDespatchEttnFromQnbDocs } from "./backfillDespatchEttnFromQnbDo
 import { enrichInvoiceDespatchesUblByEttn } from "./enrichInvoiceDespatchesUblByEttn.js";
 import { updateQnbInvoiceYonetimOnay } from "./updateQnbInvoiceYonetimOnay.js";
 import { onQnbInvoiceApproved } from "./triggers/onQnbInvoiceApproved.js";
+import { autoSupplierInvoicePipeline } from "./autoSupplierInvoicePipeline.js";
 
 // Probe/debug (uygulama kullanmıyor; CPU kotası için deploy edilmiyor):
 // probeQnbTutar, probeQnbIrsaliyeList, qnbDescribe, qnbOpInfo, qnbUserDescribe, qnbUserOpInfo
@@ -50,4 +51,5 @@ export {
   enrichInvoiceDespatchesUblByEttn,
   updateQnbInvoiceYonetimOnay,
   onQnbInvoiceApproved,
+  autoSupplierInvoicePipeline,
 };
