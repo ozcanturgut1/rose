@@ -73,3 +73,6 @@ myapp/.flutter-plugins-dependencies
 
 # dataconnect generated files
 .dataconnect
+
+# Local dev notes (per-worktree, not shared)
+dev-notes-*.md
