@@ -309,6 +309,108 @@ async function listInvoicesForGelisRange(vknTckn, fromYmd, toYmd) {
 }
 
 /**
+ * QNB cap=100 + tek g\u00fcn=0 problemi:
+ *   `gelenBelgeTutarBilgileriSorgula` (a) bir tarih aral\u0131\u011f\u0131nda en fazla 100 sat\u0131r
+ *   d\u00f6n\u00fcyor; (b) ayn\u0131 g\u00fcn (start==end) sorguland\u0131\u011f\u0131nda 0 sat\u0131r d\u00f6n\u00fcyor. 10
+ *   g\u00fcnl\u00fck tek pencere yo\u011fun g\u00fcnlerde cap'e tak\u0131l\u0131p baz\u0131 faturalar\u0131 (\u00f6r.
+ *   NAS2026000000246) sessizce diskart ediyor.
+ *
+ * \u00c7\u00f6z\u00fcm: ayn\u0131 aral\u0131\u011f\u0131 \u00fcst \u00fcste binen 2 g\u00fcnl\u00fck chunk'larla doldurmak. Her chunk'\u0131n
+ * BA\u015eLANGIC tarihi bir \u00f6nceki chunk'\u0131n B\u0130T\u0130\u015e tarihi olur. Bug\u00fcnk\u00fc faturalar\u0131
+ * kapsamak i\u00e7in pencerenin sa\u011f ucu 1 g\u00fcn ileri ta\u015f\u0131n\u0131r.
+ *   \u00f6rn rolling window=[03/05..12/05] i\u00e7in chunk'lar:
+ *     [12/05, 13/05] \u2192 [11/05, 12/05] \u2192 [10/05, 11/05] \u2192 \u2026 \u2192 [03/05, 04/05]
+ * Her chunk max 100 sat\u0131r d\u00f6nd\u00fcr\u00fcr; \u00fcst \u00fcste binme sayesinde s\u0131n\u0131r g\u00fcnleri iki kez
+ * sorgu yedi\u011fi i\u00e7in cap kayb\u0131 olu\u015fursa kom\u015fu chunk yakalar. Sonu\u00e7lar `belgeNo`/ettn
+ * \u00fczerinden dedupe edilir.
+ */
+function enumerateTwoDayChunks(fromYmd, toYmd) {
+  const [fy, fm, fd] = String(fromYmd).split("-").map(Number);
+  const [ty, tm, td] = String(toYmd).split("-").map(Number);
+  if (!fy || !ty) return [];
+  const fromDt = new Date(Date.UTC(fy, fm - 1, fd));
+  const toDt = new Date(Date.UTC(ty, tm - 1, td));
+  if (toDt.getTime() < fromDt.getTime()) return [];
+
+  const fmt = (dt) => {
+    const y = dt.getUTCFullYear();
+    const m = String(dt.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(dt.getUTCDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  };
+
+  const chunks = [];
+  let curEnd = new Date(toDt);
+  curEnd.setUTCDate(curEnd.getUTCDate() + 1);
+  while (true) {
+    const start = new Date(curEnd);
+    start.setUTCDate(start.getUTCDate() - 1);
+    chunks.push({ from: fmt(start), to: fmt(curEnd) });
+    if (start.getTime() <= fromDt.getTime()) break;
+    curEnd = start;
+  }
+  return chunks;
+}
+
+async function listInvoicesForGelisRangeTwoDay(
+  vknTckn,
+  fromYmd,
+  toYmd,
+  shouldStop
+) {
+  const chunks = enumerateTwoDayChunks(fromYmd, toYmd);
+  const seen = new Map();
+  const perChunkCounts = [];
+  let stopped = false;
+
+  for (const ch of chunks) {
+    if (typeof shouldStop === "function" && shouldStop()) {
+      stopped = true;
+      break;
+    }
+    let chunkItems = [];
+    try {
+      const resp = await callConnector("gelenBelgeTutarBilgileriSorgula", {
+        vergiTcKimlikNo: String(vknTckn),
+        belgeTuru: "FATURA",
+        baslangicGelisTarihi: ch.from,
+        bitisGelisTarihi: ch.to,
+      });
+      chunkItems = normalizeListItems(resp);
+    } catch (e) {
+      logger.warn("autoPipeline step1: chunk sorgu hatas\u0131", {
+        chunk: `${ch.from}..${ch.to}`,
+        err: String(e?.message || e).slice(0, 300),
+      });
+      chunkItems = [];
+    }
+    perChunkCounts.push({
+      from: ch.from,
+      to: ch.to,
+      count: chunkItems.length,
+    });
+    for (const it of chunkItems) {
+      const key =
+        invoiceDocIdForKey(it) ||
+        (it?.ettn || it?.ETTN ? `ettn_${it.ettn || it.ETTN}` : null);
+      if (!key) continue;
+      if (!seen.has(key)) seen.set(key, it);
+    }
+  }
+
+  const items = Array.from(seen.values());
+  items.sort((a, b) => dateSortKey(b).localeCompare(dateSortKey(a)));
+  return {
+    items,
+    source: "gelenBelgeTutarBilgileriSorgula(2dayOverlap)",
+    chunksCalled: perChunkCounts.length,
+    totalChunks: chunks.length,
+    perChunkCounts,
+    stoppedEarly: stopped,
+  };
+}
+
+/**
  * Mükerrer ingest engelleme: archiveCompletedInvoice ile `qnb_invoices_archive`'a
  * taşınmış (ETA SQL kaydı tamamlanmış) faturalar tekrar ingest edilmez. Aksi halde
  * portal listesi 10 günlük pencerede aynı belgeyi yeniden dönerse onay/ETA döngüsü
@@ -361,10 +463,17 @@ async function runStep1IngestSupplierInvoices(startedAtMs) {
     };
   }
   const { from, to } = rollingWindow(ROLLING_WINDOW_DAYS);
-  const { items: rawItems, source } = await listInvoicesForGelisRange(
-    vknTckn,
-    from,
-    to
+  // QNB cap=100 + tek g\u00fcn=0 i\u00e7in \u00fcst \u00fcste binen 2 g\u00fcnl\u00fck chunk'lar
+  // (a\u015fa\u011f\u0131daki helper'\u0131n \u00fcst yorumunu g\u00f6r).
+  const {
+    items: rawItems,
+    source,
+    chunksCalled,
+    totalChunks,
+    perChunkCounts,
+    stoppedEarly,
+  } = await listInvoicesForGelisRangeTwoDay(vknTckn, from, to, () =>
+    deadlineExceeded(startedAtMs, STEP_BUDGET_MS.step1)
   );
   const filtered = rawItems.filter((it) => {
     const v = gondericiVknFromItem(it);
@@ -415,6 +524,10 @@ async function runStep1IngestSupplierInvoices(startedAtMs) {
     window: { from, to },
     allowedVknCount: allowed.size,
     listSource: source,
+    chunksCalled,
+    totalChunks,
+    listStoppedEarly: stoppedEarly,
+    perChunkCounts,
     totalListed: rawItems.length,
     matchedBySupplier: filtered.length,
     skippedAlreadyArchived: skippedArchived,

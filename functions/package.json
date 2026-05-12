@@ -11,7 +11,12 @@
     "eta:local-sync": "node scripts/localEtaSync.js",
     "eta:local-worker": "node scripts/localEtaWorker.js",
     "eta:list-ubl-lines": "node scripts/listUblLinesLastSqlInvoices.js",
-    "eta:list-firebase-stok-cinsi": "node scripts/listFirebaseStokCinsiLast10Invoices.js"
+    "eta:list-firebase-stok-cinsi": "node scripts/listFirebaseStokCinsiLast10Invoices.js",
+    "eta:dry-run-delete-invoices": "node scripts/dryRunDeleteEtaDenemeInvoices.js",
+    "eta:delete-invoices": "node scripts/deleteEtaDenemeInvoices.js",
+    "eta:discover-schema": "node scripts/discoverEtaFaturaSchema.js",
+    "eta:diagnose-refno": "node scripts/diagnoseEtaRefnoIssue.js",
+    "eta:patch-procs-null-safe": "node scripts/patchEtaDenemeProceduresNullSafe.js"
   },
   "engines": {
     "node": "22"

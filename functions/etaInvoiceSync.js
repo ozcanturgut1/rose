@@ -1,4 +1,5 @@
 import sql from "mssql";
+import { getFirestore } from "firebase-admin/firestore";
 import { resolveSqlTargets } from "./sqlDbTargets.js";
 
 let readPoolPromise = null;
@@ -217,7 +218,12 @@ function parseYmd(raw) {
   const s = String(raw || "").trim();
   if (!s) return new Date();
   if (/^\d{8}$/.test(s)) {
-    return new Date(`${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}T00:00:00`);
+    // UTC midnight: mssql (useUTC=true default) Date'i UTC bileşenleriyle gönderir;
+    // lokal-midnight üretirsek TR (+03) ile 1 gün öncesine kayar.
+    const y = Number(s.slice(0, 4));
+    const m = Number(s.slice(4, 6));
+    const d = Number(s.slice(6, 8));
+    return new Date(Date.UTC(y, m - 1, d));
   }
   const d = new Date(s);
   return Number.isNaN(d.getTime()) ? new Date() : d;
@@ -340,6 +346,58 @@ async function resolveErpFaturaTipNo(pool, cls) {
   return r.recordset.length ? r.recordset[0].FATFTNO : 1;
 }
 
+/**
+ * Eşlenen geçmiş faturaların FATFISTIPI değerlerinden çoğunluk oyu ile fiş tipi
+ * seçer. Yalnızca yeni faturanın sınıfı (isIade/isIstisna/hasTevkifat) ile birebir
+ * uyan kayıtlar oya katılır; çelişkili match'ler atılır. Eşitlikte daha küçük
+ * FATTIP tercih edilir. Hiç geçerli match yoksa 0 döner — çağıran taraf mevcut
+ * `resolveErpFaturaTipNo` akışına düşmelidir.
+ */
+function pickFatFisTipiFromHistory(historyMatches, cls) {
+  if (!Array.isArray(historyMatches) || historyMatches.length === 0) return 0;
+  if (!cls || typeof cls !== "object") return 0;
+  const counts = new Map();
+  for (const m of historyMatches) {
+    if (!m) continue;
+    const fatTip = Number(m.refFatTip || 0) || 0;
+    if (!fatTip) continue;
+    const sameClass =
+      Boolean(m.refIsIade) === Boolean(cls.isIade) &&
+      Boolean(m.refIsIstisna) === Boolean(cls.isIstisna) &&
+      Boolean(m.refHasTevkifat) === Boolean(cls.hasTevkifat);
+    if (!sameClass) continue;
+    counts.set(fatTip, (counts.get(fatTip) || 0) + 1);
+  }
+  if (counts.size === 0) return 0;
+  let bestKey = 0;
+  let bestCount = -1;
+  for (const [k, c] of counts.entries()) {
+    if (c > bestCount || (c === bestCount && (bestKey === 0 || k < bestKey))) {
+      bestKey = k;
+      bestCount = c;
+    }
+  }
+  return bestKey;
+}
+
+/**
+ * FATFISTIPI değerinin FATFISTIP tablosunda gerçekten karşılığı var mı?
+ * Geçmiş veride aktif olmayan/silinmiş tipler olabilir; bunlar yeni faturada
+ * "Tanımsız Fatura Tipi" hatasına yol açabilir. Yoksa 0 dönüp çağıran tarafın
+ * fallback yapması beklenir.
+ */
+async function isValidFatFisTipi(pool, fatfTno) {
+  const n = Number(fatfTno || 0) || 0;
+  if (!n) return false;
+  const r = await pool
+    .request()
+    .input("ft", sql.Int, n)
+    .query(
+      "SELECT TOP 1 FATFTNO FROM dbo.FATFISTIP WITH (NOLOCK) WHERE FATFTNO=@ft"
+    );
+  return r.recordset.length > 0;
+}
+
 function extractInvoiceLines(data) {
   const out = [];
   const up = data.ublParsed && typeof data.ublParsed === "object" ? data.ublParsed : {};
@@ -391,79 +449,73 @@ function extractInvoiceLines(data) {
   return out;
 }
 
-function extractIrsaliyeNumaralari(data) {
-  const out = [];
-  const pushVal = (v) => {
-    const s = String(v || "").trim();
-    if (!s) return;
-    if (!out.includes(s)) out.push(s);
-  };
-
-  const rel = data.relatedDespatches;
-  if (Array.isArray(rel)) {
-    for (const d of rel) {
-      if (d && typeof d === "object") {
-        pushVal(d.belgeNo || d.belgeNoStr || d.despatchNo || d.irsaliyeNo);
-      }
-    }
+function parseIrsaliyeDateRaw(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return null;
+  if (/^\d{8}$/.test(s)) {
+    const dt = parseYmd(s);
+    return Number.isNaN(dt.getTime()) ? null : dt;
   }
-
-  const q = data.qnbRaw && typeof data.qnbRaw === "object" ? data.qnbRaw : {};
-  const qList = q.irsaliyeNumaralari || q.irsaliyeNoList || q.despatchNos;
-  if (Array.isArray(qList)) {
-    for (const x of qList) pushVal(x);
-  } else if (typeof qList === "string") {
-    for (const part of qList.split(/[;,]/)) pushVal(part);
-  }
-
-  return out.join(",");
+  const dt = new Date(s.length >= 10 ? s.slice(0, 10) : s);
+  return Number.isNaN(dt.getTime()) ? null : dt;
 }
 
-/** `relatedDespatches[].issueDate` → ilk geçerli tarih (YYYYMMDD veya ISO). */
-function extractFirstIrsaliyeTarihiFromRelated(data) {
-  const rel = data.relatedDespatches;
-  if (!Array.isArray(rel)) return null;
-  for (const d of rel) {
-    if (!d || typeof d !== "object") continue;
-    const raw = d.issueDate ?? d.belgeTarihi ?? d.issue_date;
-    const s = String(raw || "").trim();
+/**
+ * `qnb_invoices/{docId}/despatches` alt koleksiyonundan irsaliye listesini okur.
+ * Sıralama önceliği:
+ *   1) `qnb_invoices/{docId}.relatedBelgeNos` (UBL sırası) varsa onu izler.
+ *   2) Aksi halde issueDate ASC, sonra belgeNo ASC.
+ *
+ * Dönüş: `[{ belgeNo, issueDate (Date|null) }, ...]`
+ */
+async function loadDespatchesFromSubcollection(docId) {
+  if (!docId) return [];
+  const db = getFirestore();
+  const invRef = db.collection("qnb_invoices").doc(docId);
+  const [invSnap, subSnap] = await Promise.all([
+    invRef.get(),
+    invRef.collection("despatches").get(),
+  ]);
+  if (subSnap.empty) return [];
+
+  const byBelgeNo = new Map();
+  for (const d of subSnap.docs) {
+    const data = d.data() || {};
+    const belgeNo = String(data.belgeNo ?? data.belgeNoStr ?? "").trim();
+    if (!belgeNo || byBelgeNo.has(belgeNo)) continue;
+    byBelgeNo.set(belgeNo, {
+      belgeNo,
+      issueDate: parseIrsaliyeDateRaw(data.issueDate ?? data.belgeTarihi ?? null),
+    });
+  }
+  if (!byBelgeNo.size) return [];
+
+  const invData = invSnap.exists ? invSnap.data() || {} : {};
+  const order = Array.isArray(invData.relatedBelgeNos) ? invData.relatedBelgeNos : [];
+  const ordered = [];
+  for (const bn of order) {
+    const s = String(bn || "").trim();
     if (!s) continue;
-    if (/^\d{8}$/.test(s)) {
-      const dt = parseYmd(s);
-      if (!Number.isNaN(dt.getTime())) return dt;
-      continue;
+    const m = byBelgeNo.get(s);
+    if (m) {
+      ordered.push(m);
+      byBelgeNo.delete(s);
     }
-    const dt = new Date(s);
-    if (!Number.isNaN(dt.getTime())) return dt;
   }
-  return null;
+  const remaining = Array.from(byBelgeNo.values()).sort((a, b) => {
+    const va = a.issueDate ? a.issueDate.getTime() : Number.POSITIVE_INFINITY;
+    const vb = b.issueDate ? b.issueDate.getTime() : Number.POSITIVE_INFINITY;
+    if (va !== vb) return va - vb;
+    return a.belgeNo.localeCompare(b.belgeNo);
+  });
+  return ordered.concat(remaining);
 }
 
-/** Fatura UBL `cac:DespatchDocumentReference/cbc:IssueDate` (varsa). */
-function extractFirstIrsaliyeTarihiFromUbl(data) {
-  const up = data.ublParsed && typeof data.ublParsed === "object" ? data.ublParsed : {};
-  const inv = firstOf(up.Invoice);
-  if (!inv || typeof inv !== "object") return null;
-  const ddr = inv.DespatchDocumentReference;
-  const arr = Array.isArray(ddr) ? ddr : ddr ? [ddr] : [];
-  for (const d of arr) {
-    if (!d || typeof d !== "object") continue;
-    const raw = d.IssueDate;
-    const s = textNode(raw);
-    if (!s) continue;
-    if (/^\d{8}$/.test(s)) {
-      const dt = parseYmd(s);
-      if (!Number.isNaN(dt.getTime())) return dt;
-      continue;
-    }
-    const dt = new Date(s.length >= 10 ? s.slice(0, 10) : s);
-    if (!Number.isNaN(dt.getTime())) return dt;
-  }
-  return null;
-}
-
-function extractFirstIrsaliyeTarihi(data) {
-  return extractFirstIrsaliyeTarihiFromRelated(data) || extractFirstIrsaliyeTarihiFromUbl(data);
+function joinDespatchBelgeNos(despatches) {
+  return (Array.isArray(despatches) ? despatches : [])
+    .map((d) => String(d?.belgeNo || "").trim())
+    .filter(Boolean)
+    .join(",");
 }
 
 function extractExchangeRateFromUbl(data) {
@@ -560,23 +612,21 @@ function extractIstisnaFromUbl(data) {
 
 /**
  * `sp_Fatura_Kayit` FATFISIRSTAR / FATFISIRSNO alanlarını fatura tarihi/numarasına yazar ve
- * `@IrsaliyeNumaralari` parametresini kullanmaz. Bu güncelleme Firestore `relatedDespatches` + qnb irsaliye listesini yansıtır.
+ * `@IrsaliyeNumaralari` parametresini kullanmaz. Bu güncelleme `qnb_invoices/{docId}/despatches`
+ * alt koleksiyonundan okunan listenin ILK kaydını yansıtır (belgeNo + issueDate).
  * İrsaliye numarası yoksa `FATFISIRSNO` temizlenir (fatura no tekrarı kalkar).
  */
-async function patchFatFisIrsaliyeAlanlari(wPool, fatFisRefNo, afterData) {
-  const joined = extractIrsaliyeNumaralari(afterData).trim();
-  const firstNo = joined
-    .split(/[,;]/)
-    .map((x) => String(x || "").trim())
-    .find(Boolean);
-  const irTar = extractFirstIrsaliyeTarihi(afterData);
+async function patchFatFisIrsaliyeAlanlari(wPool, fatFisRefNo, despatches) {
+  const first = (Array.isArray(despatches) ? despatches : [])[0] || null;
+  const firstNo = String(first?.belgeNo || "").trim();
+  const irTar = first?.issueDate instanceof Date ? first.issueDate : null;
   const hasNo = Boolean(firstNo);
   const hasTar = Boolean(irTar);
 
   await wPool
     .request()
     .input("ref", sql.Int, fatFisRefNo)
-    .input("irsno", sql.NVarChar(80), hasNo ? String(firstNo).slice(0, 80) : "")
+    .input("irsno", sql.NVarChar(80), hasNo ? firstNo.slice(0, 80) : "")
     .input("irstar", sql.DateTime, hasTar ? irTar : new Date("1900-01-01"))
     .input("applyTar", sql.Bit, hasTar ? 1 : 0)
     .query(`
@@ -999,7 +1049,8 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   }
 
   const cls = classifyInvoiceType(afterData);
-  const erpFaturaTipiNo = await resolveErpFaturaTipNo(rPool, cls);
+  // erpFaturaTipiNo aşağıda paraBirimi hesabından sonra, eşlenen geçmiş fatura
+  // çoğunluk oyu ile belirleniyor (kullanıcı talebi 12 May 2026).
   const lines = extractInvoiceLines(afterData);
   const usableLines = lines.length
     ? lines
@@ -1056,7 +1107,37 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   const connectorUser = (process.env.ETA_CONNECTOR_USER || "YMM").trim();
   const profile = String(q.faturaProfili || afterData?.faturaProfili || extractProfileFromUbl(afterData) || "TEMELFATURA").trim();
   const invoiceTypeCode = String(q.faturaTipi || cls.invType || "").trim();
-  const irsaliyeNumaralari = extractIrsaliyeNumaralari(afterData);
+  const despatchesFromSubcol = await loadDespatchesFromSubcollection(docId);
+  const irsaliyeNumaralari = joinDespatchBelgeNos(despatchesFromSubcol);
+
+  // [KULLANICI TALEBİ - 12 May 2026] Yeni faturanın fiş tipi (ErpFaturaTipi),
+  // tedarikçi geçmişindeki eşlenen faturaların FATFISTIPI değerlerinden çoğunluk
+  // oyu ile belirlenir. Sınıf (IADE/ISTISNA/TEVKIFAT) çelişen match'ler atılır;
+  // hiç geçerli match yoksa mevcut resolveErpFaturaTipNo akışına düşülür.
+  //
+  // sp_Fatura_Kayit çağrısı satır loop'undan ÖNCE çalıştığı için satır eşleşmelerini
+  // burada toplu hesaplıyoruz; line loop bu sonuçları (preMatchedHistories[i])
+  // doğrudan kullanır — extra sorgu yapılmaz, davranış aynıdır.
+  const preMatchedHistories = [];
+  for (const l of usableLines) {
+    if (!supplierVkn) {
+      preMatchedHistories.push(null);
+      continue;
+    }
+    const m = await findStockCodeBySupplierHistory(rPool, {
+      supplierVkn,
+      line: l,
+      invoiceClass: cls,
+      currencyCode: paraBirimi,
+    });
+    preMatchedHistories.push(m || null);
+  }
+  const historicalFatTipPick = pickFatFisTipiFromHistory(preMatchedHistories, cls);
+  const erpFaturaTipiNo =
+    historicalFatTipPick && (await isValidFatFisTipi(rPool, historicalFatTipPick))
+      ? historicalFatTipPick
+      : await resolveErpFaturaTipNo(rPool, cls);
+
   const lineMatches = [];
   const lineCurrency = [];
   let refFatFisForMuhasebe = 0;
@@ -1120,14 +1201,8 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     const rawItemCode = String(l.itemCode || "").trim().slice(0, 40);
     let itemCodeResolved = null;
     let matchSource = null;
-    const historyMatch = supplierVkn
-      ? await findStockCodeBySupplierHistory(rPool, {
-          supplierVkn,
-          line: l,
-          invoiceClass: cls,
-          currencyCode: paraBirimi,
-        })
-      : null;
+    // Eşleşme yukarıda toplu hesaplandı (preMatchedHistories); cache'ten kullan.
+    const historyMatch = preMatchedHistories[i] ?? null;
     if (!refFatFisForMuhasebe && historyMatch?.refFatFisRefNo) {
       // Reference invoice for accounting pattern (DENEME only). Apply tevkifat threshold compatibility if needed.
       const limit = parseNum(process.env.ETA_TEVKIFAT_LIMIT_TL, 12000);
@@ -1278,7 +1353,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     }
   }
 
-  await patchFatFisIrsaliyeAlanlari(wPool, fatFisRefNo, afterData);
+  await patchFatFisIrsaliyeAlanlari(wPool, fatFisRefNo, despatchesFromSubcol);
   await patchCurrencyFields(wPool, fatFisRefNo, {
     currencyCode: paraBirimi,
     dovizKuru: effectiveDovizKuru,
