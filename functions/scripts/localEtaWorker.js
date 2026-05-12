@@ -3,6 +3,7 @@ import { ensureAdmin } from "../adminInit.js";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { syncApprovedInvoiceToEta } from "../etaInvoiceSync.js";
 import { formatEtaError } from "../etaError.js";
+import { archiveCompletedInvoice } from "../archiveCompletedInvoice.js";
 
 function normalizeStatus(value) {
   return String(value || "")
@@ -50,6 +51,14 @@ async function processDoc(db, docSnap) {
       },
       { merge: true }
     );
+
+    try {
+      const archiveResult = await archiveCompletedInvoice(docId, { skipStatusCheck: true });
+      console.log(`[ARCHIVE] ${docId}: ${JSON.stringify(archiveResult)}`);
+    } catch (archiveErr) {
+      console.error(`[ARCHIVE-ERR] ${docId}: ${archiveErr?.message || archiveErr}`);
+    }
+
     return { skipped: false, result };
   } catch (err) {
     const msg = formatEtaError(err);

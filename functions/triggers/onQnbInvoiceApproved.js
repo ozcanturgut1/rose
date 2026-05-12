@@ -5,6 +5,7 @@ ensureAdmin();
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { syncApprovedInvoiceToEta } from "../etaInvoiceSync.js";
 import { formatEtaError } from "../etaError.js";
+import { archiveCompletedInvoice } from "../archiveCompletedInvoice.js";
 
 function normalizeStatus(value) {
   return String(value || "")
@@ -82,6 +83,17 @@ export const onQnbInvoiceApproved = onDocumentUpdated(
         { merge: true }
       );
       console.log("onQnbInvoiceApproved: sql sync completed", docId, result);
+
+      try {
+        const archiveResult = await archiveCompletedInvoice(docId, { skipStatusCheck: true });
+        console.log("onQnbInvoiceApproved: archive completed", docId, archiveResult);
+      } catch (archiveErr) {
+        console.error(
+          "onQnbInvoiceApproved: archive failed",
+          docId,
+          archiveErr?.message || archiveErr
+        );
+      }
     } catch (err) {
       const msg = formatEtaError(err);
       await ref.set(
