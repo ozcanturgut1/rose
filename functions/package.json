@@ -16,7 +16,9 @@
     "eta:delete-invoices": "node scripts/deleteEtaDenemeInvoices.js",
     "eta:discover-schema": "node scripts/discoverEtaFaturaSchema.js",
     "eta:diagnose-refno": "node scripts/diagnoseEtaRefnoIssue.js",
-    "eta:patch-procs-null-safe": "node scripts/patchEtaDenemeProceduresNullSafe.js"
+    "eta:patch-procs-null-safe": "node scripts/patchEtaDenemeProceduresNullSafe.js",
+    "eta:patch-fatura-tip-sp": "node scripts/patchSpFaturaKayitCariBakiyeAllTypes.js",
+    "eta:patch-fatura-detay-tip-sp": "node scripts/patchSpFaturaDetayKayitStokAllTypes.js"
   },
   "engines": {
     "node": "22"

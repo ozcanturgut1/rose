@@ -336,10 +336,9 @@ async function resolveErpFaturaTipNo(pool, cls) {
     if (r.recordset.length) return r.recordset[0].FATFTNO;
   }
 
-  // NOTE:
-  // ETA'daki mevcut sp_Fatura_Kayit prosedürü cari bakiye güncellemesinde yalnızca
-  // ALIM / GIDER / ALIM IADE tiplerini destekliyor. TEVKIFATLI ALIS veya YURT DISI ALIM
-  // gibi tipler Tanimsiz Fatura Tipi hatasına düşebildiği için, alış akışında güvenli varsayılan ALIM.
+  // NOTE: sp_Fatura_Kayit cari adımı ETA_DENEME_2026'da tüm FATFISTIP kodlarıyla uyumlu
+  // olacak şekilde yamalanmıştır (patchSpFaturaKayitCariBakiyeAllTypes.js). Fallback
+  // yine güvenli varsayılan: İADE ailesi veya ALIM.
   const r = await pool
     .request()
     .query("SELECT TOP 1 FATFTNO FROM dbo.FATFISTIP WITH (NOLOCK) WHERE UPPER(FATFTKOD)='ALIM' ORDER BY FATFTNO");
@@ -347,20 +346,39 @@ async function resolveErpFaturaTipNo(pool, cls) {
 }
 
 /**
+ * Çoğunluk oyu için geçerli FATFTNO kümesi: FATFISTIP'taki tüm fiş tipleri.
+ * (sp_Fatura_Kayit yamalı sürümde cari güncellemesi İADE/IADE ayrımıyla tüm kodları kabul eder.)
+ */
+async function loadSpFaturaKayitSafeFatftNoSet(pool) {
+  const rs = await pool.request().query(
+    "SELECT FATFTNO FROM dbo.FATFISTIP WITH (NOLOCK)"
+  );
+  return new Set(
+    (rs.recordset || [])
+      .map((r) => Number(r.FATFTNO) || 0)
+      .filter((n) => n > 0)
+  );
+}
+
+/**
  * Eşlenen geçmiş faturaların FATFISTIPI değerlerinden çoğunluk oyu ile fiş tipi
  * seçer. Yalnızca yeni faturanın sınıfı (isIade/isIstisna/hasTevkifat) ile birebir
  * uyan kayıtlar oya katılır; çelişkili match'ler atılır. Eşitlikte daha küçük
- * FATTIP tercih edilir. Hiç geçerli match yoksa 0 döner — çağıran taraf mevcut
+ * FATTIP tercih edilir. `allowedFatft` verilmişse yalnızca bu kümedeki FATFTNO'lar
+ * sayılır (FATFISTIP ile uyum). Hiç geçerli oy yoksa 0 döner — çağıran taraf
  * `resolveErpFaturaTipNo` akışına düşmelidir.
  */
-function pickFatFisTipiFromHistory(historyMatches, cls) {
+function pickFatFisTipiFromHistory(historyMatches, cls, allowedFatft) {
   if (!Array.isArray(historyMatches) || historyMatches.length === 0) return 0;
   if (!cls || typeof cls !== "object") return 0;
+  const allowed =
+    allowedFatft instanceof Set && allowedFatft.size > 0 ? allowedFatft : null;
   const counts = new Map();
   for (const m of historyMatches) {
     if (!m) continue;
     const fatTip = Number(m.refFatTip || 0) || 0;
     if (!fatTip) continue;
+    if (allowed && !allowed.has(fatTip)) continue;
     const sameClass =
       Boolean(m.refIsIade) === Boolean(cls.isIade) &&
       Boolean(m.refIsIstisna) === Boolean(cls.isIstisna) &&
@@ -378,24 +396,6 @@ function pickFatFisTipiFromHistory(historyMatches, cls) {
     }
   }
   return bestKey;
-}
-
-/**
- * FATFISTIPI değerinin FATFISTIP tablosunda gerçekten karşılığı var mı?
- * Geçmiş veride aktif olmayan/silinmiş tipler olabilir; bunlar yeni faturada
- * "Tanımsız Fatura Tipi" hatasına yol açabilir. Yoksa 0 dönüp çağıran tarafın
- * fallback yapması beklenir.
- */
-async function isValidFatFisTipi(pool, fatfTno) {
-  const n = Number(fatfTno || 0) || 0;
-  if (!n) return false;
-  const r = await pool
-    .request()
-    .input("ft", sql.Int, n)
-    .query(
-      "SELECT TOP 1 FATFTNO FROM dbo.FATFISTIP WITH (NOLOCK) WHERE FATFTNO=@ft"
-    );
-  return r.recordset.length > 0;
 }
 
 function extractInvoiceLines(data) {
@@ -1132,9 +1132,14 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     });
     preMatchedHistories.push(m || null);
   }
-  const historicalFatTipPick = pickFatFisTipiFromHistory(preMatchedHistories, cls);
+  const spSafeFatft = await loadSpFaturaKayitSafeFatftNoSet(rPool);
+  const historicalFatTipPick = pickFatFisTipiFromHistory(
+    preMatchedHistories,
+    cls,
+    spSafeFatft
+  );
   const erpFaturaTipiNo =
-    historicalFatTipPick && (await isValidFatFisTipi(rPool, historicalFatTipPick))
+    historicalFatTipPick > 0 && spSafeFatft.has(historicalFatTipPick)
       ? historicalFatTipPick
       : await resolveErpFaturaTipNo(rPool, cls);
 

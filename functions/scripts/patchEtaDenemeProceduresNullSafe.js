@@ -22,6 +22,8 @@
  *   node scripts/patchEtaDenemeProceduresNullSafe.js --apply --confirm-write-db=ETA_DENEME_2026
  */
 import "dotenv/config";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import sql from "mssql";
 import { resolveSqlTargets } from "../sqlDbTargets.js";
 
@@ -205,7 +207,19 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error("patchEtaDenemeProceduresNullSafe failed:", err?.message || err);
-  process.exitCode = 1;
-});
+const isRunDirectly = (() => {
+  const a1 = process.argv[1];
+  if (!a1) return false;
+  try {
+    return path.resolve(fileURLToPath(import.meta.url)) === path.resolve(a1);
+  } catch {
+    return false;
+  }
+})();
+
+if (isRunDirectly) {
+  main().catch((err) => {
+    console.error("patchEtaDenemeProceduresNullSafe failed:", err?.message || err);
+    process.exitCode = 1;
+  });
+}

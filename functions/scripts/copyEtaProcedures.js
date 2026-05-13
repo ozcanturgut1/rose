@@ -1,5 +1,6 @@
 import sql from "mssql";
 import { transformMaxToIsnullMax } from "./patchEtaDenemeProceduresNullSafe.js";
+import { transformSpFaturaKayitCariBakiyeAllTypes } from "./patchSpFaturaKayitCariBakiyeAllTypes.js";
 
 const sourceDb = "ETA_TEKNIKFILAMENT_2026";
 const targetDb = "ETA_DENEME_2026";
@@ -54,7 +55,11 @@ for (const row of defs) {
       : Math.max(createIdx, createIdx2);
   if (idx < 0) throw new Error(`CREATE PROC not found in definition: ${row.name}`);
   def = def.slice(idx);
-  const { result: patchedDef, replacements } = transformMaxToIsnullMax(def);
+  const { result: afterNull, replacements } = transformMaxToIsnullMax(def);
+  let patchedDef = afterNull;
+  if (row.name === "sp_Fatura_Kayit") {
+    patchedDef = transformSpFaturaKayitCariBakiyeAllTypes(patchedDef).result;
+  }
   await dst
     .request()
     .query(`IF OBJECT_ID('dbo.${row.name}','P') IS NOT NULL DROP PROCEDURE dbo.${row.name};`);
