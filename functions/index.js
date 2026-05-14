@@ -25,6 +25,8 @@ import { listGelenBelgeleriExt } from "./listGelenBelgeleriExt.js";
 import { backfillDespatchEttnFromQnbDocs } from "./backfillDespatchEttnFromQnbDocs.js";
 import { enrichInvoiceDespatchesUblByEttn } from "./enrichInvoiceDespatchesUblByEttn.js";
 import { updateQnbInvoiceYonetimOnay } from "./updateQnbInvoiceYonetimOnay.js";
+import { listAraOnayUsers } from "./listAraOnayUsers.js";
+import { assignQnbInvoiceAraOnay } from "./assignQnbInvoiceAraOnay.js";
 import { onQnbInvoiceApproved } from "./triggers/onQnbInvoiceApproved.js";
 import { autoSupplierInvoicePipeline } from "./autoSupplierInvoicePipeline.js";
 
@@ -50,6 +52,8 @@ export {
   backfillDespatchEttnFromQnbDocs,
   enrichInvoiceDespatchesUblByEttn,
   updateQnbInvoiceYonetimOnay,
+  listAraOnayUsers,
+  assignQnbInvoiceAraOnay,
   onQnbInvoiceApproved,
   autoSupplierInvoicePipeline,
 };

@@ -104,6 +104,16 @@
         "source": "/api/updateQnbInvoiceYonetimOnay",
         "function": "updateQnbInvoiceYonetimOnay",
         "region": "europe-west1"
+      },
+      {
+        "source": "/api/listAraOnayUsers",
+        "function": "listAraOnayUsers",
+        "region": "europe-west1"
+      },
+      {
+        "source": "/api/assignQnbInvoiceAraOnay",
+        "function": "assignQnbInvoiceAraOnay",
+        "region": "europe-west1"
       }
     ]
   }

@@ -6,6 +6,7 @@ import 'package:printing/printing.dart';
 
 import '../services/qnb_api.dart';
 import '../utils/open_bytes.dart';
+import '../widgets/ara_onay_yonlendir_dialog.dart';
 
 String _safeDocKey(String s) => s.replaceAll(RegExp(r'[/\\]'), '_');
 
@@ -139,6 +140,21 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
   String get _invoiceDocId {
     final belgeNo = (widget.item['belgeNo']?.toString() ?? '').trim();
     return 'invoice_${_safeDocKey(belgeNo)}';
+  }
+
+  List<Widget> _araOnayBarActions(BuildContext context) {
+    if (!_isAraOnay) return const [];
+    return [
+      IconButton(
+        tooltip: 'Yönlendir',
+        icon: const Icon(Icons.person_search_outlined),
+        onPressed: () async {
+          final ok = await showAraOnayYonlendirDialog(context, api: widget.api, item: widget.item);
+          if (!context.mounted) return;
+          if (ok) Navigator.of(context).pop(true);
+        },
+      ),
+    ];
   }
 
   Future<void> _submit(String decision) async {
@@ -336,6 +352,7 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
       titleSpacing: 4,
       centerTitle: false,
       toolbarHeight: 52,
+      actions: _araOnayBarActions(context),
       title: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
@@ -436,6 +453,7 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
                 ? AppBar(
                     titleSpacing: 8,
                     toolbarHeight: 52,
+                    actions: _araOnayBarActions(context),
                     title: Text(
                       _allOnayAciklamalarDisplayText(),
                       maxLines: 3,
@@ -454,6 +472,7 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
                 ? AppBar(
                     titleSpacing: 8,
                     toolbarHeight: 52,
+                    actions: _araOnayBarActions(context),
                     title: Text(
                       _allOnayAciklamalarDisplayText(),
                       maxLines: 3,
@@ -473,6 +492,7 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
                 ? AppBar(
                     titleSpacing: 8,
                     toolbarHeight: 52,
+                    actions: _araOnayBarActions(context),
                     title: Text(
                       _allOnayAciklamalarDisplayText(),
                       maxLines: 3,

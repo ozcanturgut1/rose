@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../services/qnb_api.dart';
+import '../widgets/ara_onay_yonlendir_dialog.dart';
 import 'invoice_json_review_screen.dart';
 import 'invoice_pdf_review_screen.dart';
 
@@ -24,7 +25,7 @@ import 'invoice_pdf_review_screen.dart';
 /// ilgili butonlar → [QnbApi.syncAllDespatches].
 ///
 /// **ara_onay** + dolu [profileBirim]: yalnızca `suppliers/{birim}` belgesindeki VKN listesiyle
-/// eşleşen `supplierVkn` / `qnbRaw.gondericiVkn` faturaları gösterilir.
+/// eşleşen `supplierVkn` / `qnbRaw.gondericiVkn` faturaları gösterilir; yönlendirme `araOnayAtananUid` ile yapılır.
 class Son10FaturaScreen extends StatefulWidget {
   const Son10FaturaScreen({super.key, required this.api, this.userRole, this.profileBirim});
 
@@ -352,6 +353,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     final col = FirebaseFirestore.instance.collection('qnb_invoices');
     final mode = _listFilterMode;
     final profileBirim = widget.profileBirim?.trim() ?? '';
+    final myUid = FirebaseAuth.instance.currentUser?.uid ?? '';
     final araOnaySupplierVkns = (mode == 'ara_onay' && profileBirim.isNotEmpty)
         ? await _fetchSupplierVknsForBirim(profileBirim)
         : null;
@@ -374,6 +376,8 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
         if (onay.isNotEmpty) continue;
         seen.add(d.id);
         final item = _invoiceDocToListItem(data);
+        item['invoiceDocId'] = d.id;
+        item['araOnayAtananUid'] = data['araOnayAtananUid']?.toString();
         item['muhasebeBeklemeParantez'] =
             _beklemeParantezMetni(nihaiKuyruk: false, data: data);
         out.add(item);
@@ -383,6 +387,8 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
         if (seen.contains(d.id)) continue;
         final data = d.data();
         final item = _invoiceDocToListItem(data);
+        item['invoiceDocId'] = d.id;
+        item['araOnayAtananUid'] = data['araOnayAtananUid']?.toString();
         item['muhasebeBeklemeParantez'] =
             _beklemeParantezMetni(nihaiKuyruk: true, data: data);
         out.add(item);
@@ -421,11 +427,15 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
       final onay = data['onayDurumu']?.toString().trim() ?? '';
       if (mode == 'ara_onay') {
         if (onay.isNotEmpty) continue;
-        if (profileBirim.isNotEmpty) {
-          final allowed = araOnaySupplierVkns ?? <String>{};
-          if (allowed.isEmpty) continue;
-          final vkn = _invoiceSupplierVknDigits(data);
-          if (vkn == null || !allowed.contains(vkn)) continue;
+        final assigned = (data['araOnayAtananUid']?.toString() ?? '').trim();
+        if (assigned.isNotEmpty && assigned != myUid) continue;
+        if (assigned.isEmpty) {
+          if (profileBirim.isNotEmpty) {
+            final allowed = araOnaySupplierVkns ?? <String>{};
+            if (allowed.isEmpty) continue;
+            final vkn = _invoiceSupplierVknDigits(data);
+            if (vkn == null || !allowed.contains(vkn)) continue;
+          }
         }
       } else if (mode == 'nihai_onay') {
         if (!_onayDurumuIsNihaiPool(data['onayDurumu'])) continue;
@@ -436,7 +446,10 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
           if (!_onayDurumuIsOnaylandi(data['onayDurumu'])) continue;
         }
       }
-      out.add(_invoiceDocToListItem(data));
+      final item = _invoiceDocToListItem(data);
+      item['invoiceDocId'] = d.id;
+      item['araOnayAtananUid'] = data['araOnayAtananUid']?.toString();
+      out.add(item);
     }
 
     out.sort((x, y) => _sortKeyFromListItem(y).compareTo(_sortKeyFromListItem(x)));
@@ -824,6 +837,15 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     );
   }
 
+  Future<void> _yonlendirFatura(BuildContext context, Map<String, dynamic> it) async {
+    final ok = await showAraOnayYonlendirDialog(context, api: widget.api, item: it);
+    if (!context.mounted) return;
+    if (ok) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Fatura yönlendirildi.')));
+      await _load();
+    }
+  }
+
   Future<void> _openInvoicePdfReview(Map<String, dynamic> it) async {
     final belgeNo = (it['belgeNo']?.toString() ?? '').trim();
     if (belgeNo.isEmpty) {
@@ -1160,6 +1182,12 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
                                         bek.isNotEmpty ? '$baseTitle  $bek' : baseTitle;
 
                                     final isAdmin = _listFilterMode == 'admin';
+                                    final isAraOnay = _listFilterMode == 'ara_onay';
+                                    final myUid = FirebaseAuth.instance.currentUser?.uid ?? '';
+                                    final atanan =
+                                        (it['araOnayAtananUid']?.toString() ?? '').trim();
+                                    final atananBana = atanan.isNotEmpty && atanan == myUid;
+
                                     final isSelected = isAdmin &&
                                         belgeNo.isNotEmpty &&
                                         _selectedBelgeNosForBackfill.contains(belgeNo);
@@ -1196,11 +1224,33 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
                                               'Gönderen: $gonderenStr',
                                               style: const TextStyle(fontSize: 12),
                                             ),
+                                          if (isAraOnay && atananBana)
+                                            Text(
+                                              'Bu fatura size yönlendirildi.',
+                                              style: TextStyle(
+                                                fontSize: 12,
+                                                color: Theme.of(context).colorScheme.primary,
+                                              ),
+                                            ),
                                         ],
                                       ),
                                       isThreeLine: false,
                                       onTap: () => _openInvoicePdfReview(it),
-                                      trailing: const Icon(Icons.chevron_right, size: 22),
+                                      trailing: isAraOnay
+                                          ? Row(
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                IconButton(
+                                                  tooltip: 'Yönlendir',
+                                                  icon: const Icon(Icons.person_search_outlined),
+                                                  onPressed: loading
+                                                      ? null
+                                                      : () => _yonlendirFatura(context, it),
+                                                ),
+                                                const Icon(Icons.chevron_right, size: 22),
+                                              ],
+                                            )
+                                          : const Icon(Icons.chevron_right, size: 22),
                                     );
                                   },
                                 ),

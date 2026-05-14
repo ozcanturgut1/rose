@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
 import '../services/qnb_api.dart';
+import '../widgets/ara_onay_yonlendir_dialog.dart';
 
 String _safeDocKey(String s) => s.replaceAll(RegExp(r'[/\\]'), '_');
 
@@ -675,6 +676,20 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Fatura özeti'),
+        actions: _isAraOnay
+            ? [
+                IconButton(
+                  tooltip: 'Yönlendir',
+                  icon: const Icon(Icons.person_search_outlined),
+                  onPressed: () async {
+                    final ok =
+                        await showAraOnayYonlendirDialog(context, api: widget.api, item: widget.item);
+                    if (!context.mounted) return;
+                    if (ok) Navigator.of(context).pop(true);
+                  },
+                ),
+              ]
+            : null,
       ),
       bottomNavigationBar: _isMuhasebe ? null : _bottomActions(context),
       body: FutureBuilder<Map<String, dynamic>>(

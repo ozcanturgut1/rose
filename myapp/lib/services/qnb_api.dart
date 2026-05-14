@@ -24,6 +24,8 @@ class QnbApi {
     required this.baseBackfillDespatchEttnFromQnbDocsUrl,
     required this.baseEnrichInvoiceDespatchesUblByEttnUrl,
     required this.baseUpdateQnbInvoiceYonetimOnayUrl,
+    required this.baseListAraOnayUsersUrl,
+    required this.baseAssignQnbInvoiceAraOnayUrl,
   });
 
   final String baseListUrl;    // https://listqnbdocs-...a.run.app
@@ -46,6 +48,8 @@ class QnbApi {
   /// `despatches` içine ETTN ile UBL (`contentUbl` / `ublParsed`) yazar; önce qnb_docs, yoksa portal.
   final String baseEnrichInvoiceDespatchesUblByEttnUrl;
   final String baseUpdateQnbInvoiceYonetimOnayUrl;
+  final String baseListAraOnayUsersUrl;
+  final String baseAssignQnbInvoiceAraOnayUrl;
 
   Future<String> _idToken() async {
     final auth = FirebaseAuth.instance;
@@ -147,6 +151,49 @@ class QnbApi {
     );
     if (r.statusCode >= 400) {
       throw Exception('UPDATE_INVOICE_ONAY_FAILED ${r.statusCode}: ${r.body}');
+    }
+  }
+
+  /// `user_profiles.role == ara_onay` olan kullanıcılar (yönlendirme hedefi).
+  Future<List<Map<String, dynamic>>> listAraOnayUsers() async {
+    final token = await _idToken();
+    final uri = Uri.parse(baseListAraOnayUsersUrl);
+    final r = await http.get(
+      uri,
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Accept': 'application/json',
+      },
+    );
+    if (r.statusCode >= 400) {
+      throw Exception('LIST_ARA_ONAY_USERS_FAILED ${r.statusCode}: ${r.body}');
+    }
+    final decoded = jsonDecode(r.body);
+    final list = (decoded as List).cast<dynamic>();
+    return list.map((e) => (e as Map).cast<String, dynamic>()).toList();
+  }
+
+  /// Bekleyen faturayı başka bir ara onay kullanıcısına atar (`qnb_invoices.araOnayAtananUid`).
+  Future<void> assignQnbInvoiceAraOnay({
+    required String docId,
+    required String targetUid,
+  }) async {
+    final token = await _idToken();
+    final uri = Uri.parse(baseAssignQnbInvoiceAraOnayUrl);
+    final r = await http.post(
+      uri,
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: jsonEncode({
+        'docId': docId.trim(),
+        'targetUid': targetUid.trim(),
+      }),
+    );
+    if (r.statusCode >= 400) {
+      throw Exception('ASSIGN_ARA_ONAY_FAILED ${r.statusCode}: ${r.body}');
     }
   }
 

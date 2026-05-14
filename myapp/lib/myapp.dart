@@ -31,6 +31,8 @@ class MyApp extends StatelessWidget {
           qnbFunctionUrl('enrichInvoiceDespatchesUblByEttn'),
       baseUpdateQnbInvoiceYonetimOnayUrl:
           qnbFunctionUrl('updateQnbInvoiceYonetimOnay'),
+      baseListAraOnayUsersUrl: qnbFunctionUrl('listAraOnayUsers'),
+      baseAssignQnbInvoiceAraOnayUrl: qnbFunctionUrl('assignQnbInvoiceAraOnay'),
     );
 
     return MaterialApp(

@@ -35,18 +35,19 @@ function normalizeProfileRole(raw) {
 }
 
 /**
- * Etkin rol listesi: önce `users/{uid}.roles`, yoksa `user_profiles/{uid}.role`, yoksa `manager` (geriye uyum).
+ * Etkin rol listesi: önce Firestore `user_profiles/{uid}.role` (uygulama ve konsol ile aynı),
+ * boşsa `users/{uid}.roles`, ikisi de yoksa `manager` (geriye uyum).
  */
 export async function getRoleSlugsForUser(uid) {
-  const snap = await db.collection("users").doc(uid).get();
-  const userDoc = snap.exists ? snap.data() : null;
-  if (userDoc?.roles && Array.isArray(userDoc.roles) && userDoc.roles.length) {
-    return userDoc.roles.map((r) => String(r).toLowerCase());
-  }
   const prof = await db.collection("user_profiles").doc(uid).get();
   if (prof.exists) {
     const one = normalizeProfileRole(prof.data()?.role);
     if (one) return [one];
+  }
+  const snap = await db.collection("users").doc(uid).get();
+  const userDoc = snap.exists ? snap.data() : null;
+  if (userDoc?.roles && Array.isArray(userDoc.roles) && userDoc.roles.length) {
+    return userDoc.roles.map((r) => String(r).toLowerCase());
   }
   return ["manager"];
 }
