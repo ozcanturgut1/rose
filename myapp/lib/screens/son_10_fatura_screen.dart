@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../formatting/display_date.dart';
 import '../services/qnb_api.dart';
 import '../widgets/ara_onay_yonlendir_dialog.dart';
 import 'invoice_json_review_screen.dart';
@@ -763,13 +764,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     );
   }
 
-  static String _formatBelgeTarih(dynamic v) {
-    final t = v?.toString().trim() ?? '';
-    if (t.length == 8 && RegExp(r'^\d{8}$').hasMatch(t)) {
-      return '${t.substring(0, 4)}-${t.substring(4, 6)}-${t.substring(6, 8)}';
-    }
-    return t.isEmpty ? '—' : t;
-  }
+  static String _formatBelgeTarih(dynamic v) => formatTurkishDate(v);
 
   int _effectiveAdminPage() {
     if (items.isEmpty) return 0;

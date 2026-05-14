@@ -114,7 +114,14 @@ class _AraOnayYonlendirDialogState extends State<_AraOnayYonlendirDialog> {
                 child: Center(child: CircularProgressIndicator()),
               );
             }
-            final rows = snap.data!
+            final allRows = snap.data;
+            if (allRows == null) {
+              return const Padding(
+                padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(child: CircularProgressIndicator()),
+              );
+            }
+            final rows = allRows
                 .where((u) {
                   final id = (u['uid']?.toString() ?? '').trim();
                   return id.isNotEmpty && id != widget.selfUid;
@@ -135,13 +142,14 @@ class _AraOnayYonlendirDialogState extends State<_AraOnayYonlendirDialog> {
                   : null,
               items: [
                 for (final u in rows)
-                  DropdownMenuItem<String>(
-                    value: u['uid']?.toString(),
-                    child: Text(
-                      _dropdownDisplayLine(u),
-                      overflow: TextOverflow.ellipsis,
+                  if ((u['uid']?.toString() ?? '').trim().isNotEmpty)
+                    DropdownMenuItem<String>(
+                      value: (u['uid']?.toString() ?? '').trim(),
+                      child: Text(
+                        _dropdownDisplayLine(u),
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
-                  ),
               ],
               onChanged: _submitting
                   ? null

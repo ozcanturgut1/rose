@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+
+import '../formatting/display_date.dart';
 import '../services/qnb_api.dart';
 import 'qnb_doc_detail_screen.dart';
 import 'son_10_fatura_screen.dart';
@@ -813,7 +815,7 @@ class _QnbDocsScreenState extends State<QnbDocsScreen> {
                       ),
                       ...relatedDespatches.map((rel) {
                         final belgeNo = rel['belgeNo']?.toString() ?? '';
-                        final issueDate = rel['issueDate']?.toString() ?? '';
+                        final issueDate = formatTurkishDate(rel['issueDate'], empty: '');
                         final supplierVkn = rel['supplierVkn']?.toString() ?? '';
                         final meta = [issueDate, supplierVkn]
                             .where((x) => x.isNotEmpty)

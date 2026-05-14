@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:printing/printing.dart';
+
+import '../formatting/display_date.dart';
 import '../services/qnb_api.dart';
 import 'dart:typed_data';
 
@@ -182,7 +184,7 @@ class _QnbDocDetailScreenState extends State<QnbDocDetailScreen> {
     final parts = <String>[];
     final issueDate = despatch['issueDate'];
     if (issueDate != null && issueDate.toString().isNotEmpty) {
-      parts.add('Tarih: $issueDate');
+      parts.add('Tarih: ${formatTurkishDate(issueDate)}');
     }
     final supplierVkn = despatch['supplierVkn'];
     if (supplierVkn != null && supplierVkn.toString().isNotEmpty) {
@@ -280,11 +282,12 @@ class _QnbDocDetailScreenState extends State<QnbDocDetailScreen> {
     final parts = <Widget>[];
 
     if (belgeBilgileri != null) {
-      final issueDate = belgeBilgileri['IssueDate']?.toString();
-      if (issueDate != null && issueDate.isNotEmpty) {
+      final issueRaw = belgeBilgileri['IssueDate'];
+      final issueLabel = formatTurkishDate(issueRaw, empty: '');
+      if (issueLabel.isNotEmpty) {
         parts.add(Padding(
           padding: const EdgeInsets.only(bottom: 6),
-          child: Text('Tarih: $issueDate', style: const TextStyle(fontWeight: FontWeight.w500)),
+          child: Text('Tarih: $issueLabel', style: const TextStyle(fontWeight: FontWeight.w500)),
         ));
       }
     }
@@ -391,7 +394,12 @@ class _QnbDocDetailScreenState extends State<QnbDocDetailScreen> {
                         child: ExpansionTile(
                           leading: const Icon(Icons.description, size: 28),
                           title: Text('İrsaliye No: ${v.belgeNo.isEmpty ? v.id : v.belgeNo}'),
-                          subtitle: v.issueDate != null ? Text('Tarih: ${v.issueDate}', style: const TextStyle(fontSize: 12)) : null,
+                          subtitle: v.issueDate != null && v.issueDate!.trim().isNotEmpty
+                              ? Text(
+                                  'Tarih: ${formatTurkishDate(v.issueDate)}',
+                                  style: const TextStyle(fontSize: 12),
+                                )
+                              : null,
                           children: [
                             Padding(
                               padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
