@@ -1,6 +1,7 @@
 import sql from "mssql";
 import { getFirestore } from "firebase-admin/firestore";
 import { resolveSqlTargets } from "./sqlDbTargets.js";
+import { computeTevkifatKdvSplit, convertDocAmountToTlIfNeeded } from "./tevkifatMuhasebe.js";
 
 let readPoolPromise = null;
 let writePoolPromise = null;
@@ -1085,11 +1086,27 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   const vergiTutari = docVergiTutari * effectiveDovizKuru;
   const odenecekTutar = docOdenecekTutar * effectiveDovizKuru;
   const ublWithholding = extractWithholdingFromUbl(afterData);
-  const tevkifatTutar = parseNum(q.tevkifatTutari ?? afterData?.tevkifatTutari ?? ublWithholding.tevkifatTutar, 0);
   const tevkifatOrani = parseNum(q.tevkifatOrani ?? afterData?.tevkifatOrani ?? ublWithholding.tevkifatOrani, 0);
   const tevkifatKodu = String(q.tevkifatKodu || afterData?.tevkifatKodu || ublWithholding.tevkifatKodu || "").trim();
+  let kdvSplit = null;
+  let tevkifatTutar = 0;
+  if (cls?.hasTevkifat) {
+    kdvSplit = computeTevkifatKdvSplit({
+      malHizmetToplam: malHizmetToplamTutari,
+      kdvOrani: usableLines[0]?.taxPercent ?? 0,
+      tevkifatOrani,
+    });
+    tevkifatTutar = kdvSplit.tevkifatTutar;
+  }
+  const vergiTutariKayit = kdvSplit ? kdvSplit.toplamKdv : vergiTutari;
+  const odenecekTutarKayit = kdvSplit ? kdvSplit.odenecekTutar : odenecekTutar;
   const ublOtvTutar = extractOtvFromUbl(afterData);
-  const otvTutar = parseNum(q.otvTutari ?? afterData?.otvTutari ?? ublOtvTutar, 0);
+  let otvTutar = parseNum(q.otvTutari ?? afterData?.otvTutari ?? ublOtvTutar, 0);
+  otvTutar = convertDocAmountToTlIfNeeded(otvTutar, {
+    isForeignCurrency,
+    kur: effectiveDovizKuru,
+    tlReferenceAmount: malHizmetToplamTutari,
+  });
   const not1 = String(afterData.onayAciklamaMuhasebe || "").trim();
   const not2 = String(afterData.onayAciklamaNihaiOnay || "").trim();
   const not3 = String(afterData.onayAciklamaAraOnay || "").trim();
@@ -1100,7 +1117,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   const stkTopBtut = malHizmetToplamTutari;
   const stkTopIsk = toplamIskonto;
   const stkTopNtut = malHizmetToplamTutari - toplamIskonto;
-  const stkTopKdv = vergiTutari;
+  const stkTopKdv = vergiTutariKayit;
   const stkTopKtut = stkTopNtut + stkTopKdv;
   const stkTopOtut = otvTutar;
 
@@ -1165,8 +1182,8 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     req.input("MalHizmetToplamTutari", sql.Decimal(18, 4), malHizmetToplamTutari);
     req.input("ToplamIskonto", sql.Decimal(18, 4), toplamIskonto);
     req.input("VergiOrani", sql.Decimal(18, 4), usableLines[0]?.taxPercent || 0);
-    req.input("VergiTutari", sql.Decimal(18, 4), vergiTutari);
-    req.input("OdenecekTutar", sql.Decimal(18, 4), odenecekTutar);
+    req.input("VergiTutari", sql.Decimal(18, 4), vergiTutariKayit);
+    req.input("OdenecekTutar", sql.Decimal(18, 4), odenecekTutarKayit);
     req.input("TevkifatOrani", sql.Decimal(18, 4), tevkifatOrani);
     req.input("TevkifatKodu", sql.NVarChar(100), tevkifatKodu);
     req.input("TevkifatTutar", sql.Decimal(18, 4), tevkifatTutar);
@@ -1368,6 +1385,23 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   });
 
   await wPool.request().input("FatFisRefNo", sql.Int, fatFisRefNo).execute("dbo.sp_FatFisToplam_Kayit");
+  if (kdvSplit) {
+    await wPool
+      .request()
+      .input("ref", sql.Int, fatFisRefNo)
+      .input("tev", sql.Decimal(18, 4), kdvSplit.tevkifatTutar)
+      .input("kdv", sql.Decimal(18, 4), kdvSplit.toplamKdv)
+      .input("gen", sql.Decimal(18, 4), kdvSplit.odenecekTutar)
+      .query(`
+        UPDATE dbo.FATFIS
+        SET
+          FATFISTEVTUTAR = @tev,
+          FATFISKDVTUTARI = @kdv,
+          FATFISGENTOPLAM = @gen,
+          FATFISTEVKIFATFLAG = 1
+        WHERE FATFISREFNO = @ref
+      `);
+  }
   await tryAutoMuhasebeForDeneme(wPool, fatFisRefNo, { refFatFisRefNo: refFatFisForMuhasebe });
 
   const verify = await wPool

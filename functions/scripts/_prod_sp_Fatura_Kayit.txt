@@ -1,0 +1,220 @@
+CREATE proc [dbo].[sp_Fatura_Kayit]
+(
+	@ErpCariKodu [nvarchar](max),
+	@ErpDepoKodu [nvarchar](max),
+	@KonnektorKullaniciAdi [nvarchar](max),
+	@VknTckn [nvarchar](11),
+	@FaturaProfili [nvarchar](50),
+	@FaturaTipi [nvarchar](50),
+	@ErpFaturaTipi [nvarchar](50),
+	@FaturaNumarasi [nvarchar](16),
+	@FaturaTarihi [datetime],
+	@IrsaliyeNumaralari [nvarchar](255),
+	@VadeTarihi [datetime],
+	@MalHizmetToplamTutari [decimal](18, 4),
+	@ToplamIskonto [decimal](18, 4),
+	@VergiOrani [decimal](18, 4),
+	@VergiTutari [decimal](18, 4),
+	@OdenecekTutar [decimal](18, 4),
+	@TevkifatOrani [decimal](18, 4),
+	@TevkifatKodu [nvarchar](50),
+	@TevkifatTutar [decimal](18, 4),
+	@OtvTutar [decimal](18, 4),
+	@ParaBirimi [nvarchar](255),
+	@DovizKuru [decimal](18, 4),
+	@Not1 [nvarchar](max),
+	@Not2 [nvarchar](max),
+	@Not3 [nvarchar](max),
+	@VergiIstisnaMuafiyetSebebi [nvarchar](255),
+    @STKFISTOPBTUT [decimal](18, 4),
+	@STKFISTOPISK [decimal](18, 4),
+	@STKFISTOPNTUT [decimal](18, 4),
+	@STKFISTOPKDV [decimal](18, 4),
+	@STKFISTOPKTUT [decimal](18, 4),
+	@STKFISTOPOTUT [decimal](18, 4),
+	@DonusDegeri1 int output,
+	@DonusDegeri2 int output
+)
+AS
+declare @FatFisRefNo int 
+set @FatFisRefNo = (select top 1 FATFISREFNO from FATFIS (nolock) where FATFISEVRAKNO1 = @FaturaNumarasi and FATFISIPTALFLAG = 0)
+IF @FatFisRefNo IS NOT NULL
+BEGIN
+     RAISERROR ('Fatura erp de kayıtlı', 11,1)
+END
+ELSE
+BEGIN
+if (select top 1 PERKOD from PERSONEL where PERKOD = @KonnektorKullaniciAdi) is null
+begin
+INSERT INTO [PERSONEL]
+([PERKOD]
+,[PERADSOYAD]
+,[PERGOREV]
+,[PEROZKOD]
+,[PERSICILNO]
+,[PERACIK1]
+,[PERACIK2]
+,[PERACIK3])
+VALUES
+(
+@KonnektorKullaniciAdi, --<PERKOD, varchar(40),>
+'EFE KONENKTÖR',--<PERADSOYAD, varchar(80),>
+' ',--<PERGOREV, varchar(40),>
+' ',--<PEROZKOD, varchar(10),>
+' ',--<PERSICILNO, varchar(40),>
+' ',--<PERACIK1, varchar(80),>
+' ',--<PERACIK2, varchar(80),>
+' '--<PERACIK3, varchar(80),>
+)
+end
+SET @FatFisRefNo = (select max(FATFISREFNO) from FATFIS WITH (NOLOCK)) + 1
+DECLARE @FatFisCarUnvan NVARCHAR(max) 
+SET @FatFisCarUnvan= (select top 1 CARUNVAN from CARKART (nolock) WHERE CARKOD = @ErpCariKodu)
+DECLARE @FatFisUlke NVARCHAR(max) 
+SET @FatFisUlke= (select top 1 ADRULKE from ADRESLER where ADRKOD1 = @ErpCariKodu)
+DECLARE @FatFisIl NVARCHAR(max) 
+SET @FatFisIl = (select top 1 ADRIL from ADRESLER where ADRKOD1 = @ErpCariKodu)
+DECLARE @FatFisIlce NVARCHAR(max) 
+SET @FatFisIlce = (select top 1 ADRILCE from ADRESLER where ADRKOD1 = @ErpCariKodu)
+DECLARE @FatFisAdres1 NVARCHAR(max) 
+SET @FatFisAdres1 = (select top 1 ADRADRES1 from ADRESLER where ADRKOD1 = @ErpCariKodu)
+DECLARE @BrutToplam decimal(18, 4)
+SET @BrutToplam = @MalHizmetToplamTutari - @ToplamIskonto
+DECLARE @AraToplam decimal(18, 4) 
+SET @AraToplam = @MalHizmetToplamTutari - @ToplamIskonto + @VergiTutari
+DECLARE @FatFisTevNo int 
+SET @FatFisTevNo = (select top 1 TEVNO from ETA_MASTERV8.dbo.TEVKIFAT where TEVKOD = @TevkifatKodu and (TEVCARPAN * 10) = @TevkifatOrani) 
+DECLARE @FatFisTevkifatFlag int 
+SET @FatFisTevkifatFlag = case when @TevkifatTutar > 0 then 1 else 0 end
+INSERT INTO FATFIS 
+( 
+FATFISTAR,
+FATFISREFNO,
+FATFISTIPI,
+FATFISGCFLAG,
+FATFISKAYONC,
+FATFISKAYNAK,
+FATFISTEVKIFATFLAG,
+FATFISANADEPO,
+FATFISCARKOD,
+FATFISCARUNVAN,
+FATFISADRESNO,
+FATFISADRES1,
+FATFISULKE,
+FATFISIL,
+FATFISILCE,
+FATFISVADETAR,
+FATFISVERHESNO,
+FATFISIRSTAR,
+FATFISIRSNO,
+FATFISEVRAKNO1,
+FATFISHAZKOD,
+FATFISKDVORANI,
+FATFISMALTOP,
+FATFISKALINDYTOP,
+FATFISBRUTTOPLAM,
+FATFISKDVMATRAHI,
+FATFISKDVTUTARI,
+FATFISARATOPLAM,
+FATFISKDVALTIEKTOP,
+FATFISGENTOPLAM,
+FATFISTEVTUTAR,
+FATFISDOVTAR,
+FATFISDOVKOD,
+FATFISDOVKUR,
+FATFISGENDOVTOP,
+FATFISTEVNO,
+FATFISTEVORAN,
+FATFISSEVNO,
+FATFISOTVFLAG,
+FATFISTOPOTUT,
+FATFISEFATFLAG
+) 
+values 
+( 
+@FaturaTarihi, --<FATFISTAR, datetime,>
+@FatFisRefNo, --<FATFISREFNO, int,>
+@ErpFaturaTipi, --<FATFISTIPI, int,>
+1, --<FATFISGCFLAG, int,>
+1, --<FATFISKAYONC, int,>
+3, --<FATFISKAYNAK, int,>
+@FatFisTevkifatFlag, --<FATFISTEVKIFATFLAG, int,>
+@ErpDepoKodu, --<FATFISANADEPO, varchar(40),>
+@ErpCariKodu, --<FATFISCARKOD, varchar(40),>
+@FatFisCarUnvan, --<FATFISCARUNVAN, varchar(80),>
+1, --<FATFISADRESNO, int,>
+@FatFisAdres1, --<FATFISADRES1, varchar(80),>
+@FatFisUlke, --<FATFISULKE, varchar(40),>
+@FatFisIl, --<FATFISIL, varchar(40),>
+@FatFisIlce, --<FATFISILCE, varchar(40),>
+isnull(@VadeTarihi, '1900-01-01 00:00:00.000'), --<FATFISVADETAR, datetime,>
+@VknTckn, --<FATFISVERHESNO, varchar(40),>
+@FaturaTarihi, --<FATFISIRSTAR, datetime,>
+@FaturaNumarasi, --<FATFISIRSNO, varchar(80),>
+@FaturaNumarasi, --<FATFISEVRAKNO1, varchar(40),>
+@KonnektorKullaniciAdi, --<FATFISHAZKOD, varchar(40),>
+@VergiOrani, --<FATFISKDVORANI, numeric(28,9),>
+@MalHizmetToplamTutari, --<FATFISMALTOP, numeric(28,9),>
+@ToplamIskonto, --<FATFISKALINDYTOP, numeric(28,9),>
+@BrutToplam, --<FATFISBRUTTOPLAM, numeric(28,9),>
+@BrutToplam, --<FATFISKDVMATRAHI, numeric(28,9),>
+@VergiTutari, --<FATFISKDVTUTARI, numeric(28,9),>
+@AraToplam, --<FATFISARATOPLAM, numeric(28,9),>
+0, --<FATFISKDVALTIEKTOP, numeric(28,9),>
+@OdenecekTutar, --<FATFISGENTOPLAM, numeric(28,9),>
+@TevkifatTutar, --<FATFISTEVTUTAR, numeric(28,9),>
+@FaturaTarihi, --<FATFISDOVTAR, datetime,>
+@ParaBirimi, --<FATFISDOVKOD, varchar(10),>
+@DovizKuru, --<FATFISDOVKUR, numeric(28,9),>
+0, --<FATFISGENDOVTOP, numeric(28,9),>???????????
+ISNULL(@FatFisTevNo, 0), --<FATFISTEVNO, int,>
+@TevkifatOrani / 100, --<FATFISTEVORAN, numeric(28,9),>
+1, --<FATFISSEVNO, int,> 
+case when @OtvTutar > 0 then 1 else 0 end, --<FATFISOTVFLAG, int,>
+@BrutToplam, --<FATFISTOPOTUT, numeric(28,9),>
+1 --<FATFISEFATFLAG, int,>
+)
+declare @FATFTKOD nvarchar(50) 
+set @FATFTKOD = (select top 1 FATFTKOD from FATFISTIP where FATFTNO = @ErpFaturaTipi)
+declare @STKFISREFNO int 
+set @STKFISREFNO = 0
+if @STKFISTOPKTUT > 0
+begin
+set @STKFISREFNO = (select max(STKFISREFNO) from STKFIS WITH (NOLOCK)) + 1
+declare @FATFTSTKFTNO int
+set @FATFTSTKFTNO = (select top 1 FATFTSTKFTNO from FATFISTIP where FATFTNO = @ErpFaturaTipi)
+insert into STKFIS
+ ( STKFISTAR,STKFISREFNO,STKFISTIPI,STKFISGCFLAG,STKFISKAYONC,STKFISIADE,STKFISKAYNAK,STKFISCARKOD,STKFISANADEPO,STKFISEVRAKNO1,STKFISEVRAKNO2,STKFISDOVTAR,STKFISTOPBTUT,STKFISTOPISK,STKFISTOPNTUT,STKFISTOPKDV,STKFISTOPKTUT,STKFISSEVNO,STKFISTOPOTUT ) 
+ values ( @FaturaTarihi,@STKFISREFNO,@FATFTSTKFTNO,1,2,(case when @FATFTKOD like '%İADE%' or @FATFTKOD like '%IADE%' then 1 else 0 end),3,@ErpCariKodu,@ErpDepoKodu,@FaturaNumarasi,@FaturaNumarasi,@FaturaTarihi,@STKFISTOPBTUT,@STKFISTOPISK,@STKFISTOPNTUT,@STKFISTOPKDV,@STKFISTOPKTUT,1,@STKFISTOPOTUT )
+end
+--cari hareketleri
+declare @CARFISREFNO int 
+set @CARFISREFNO = (select max(CARFISREFNO) from CARFIS WITH (NOLOCK)) + 1
+insert into CARFIS
+ ( CARFISTAR,CARFISREFNO,CARFISTIPI,CARFISKAYONC,CARFISKAYNAK,CARFISCARKOD,CARFISCARUNVAN,CARFISEVRAKNO1,CARFISEVRAKNO2,CARFISDOVTAR,CARFISALACAKTOP,CARFISSEVNO ) 
+ values ( @FaturaTarihi,@CARFISREFNO,4,2,3,@ErpCariKodu,@FatFisCarUnvan,@FaturaNumarasi,@FaturaNumarasi,@FaturaTarihi,@OdenecekTutar,1 )
+insert into CARHAR
+ ( CARHARTAR,CARHARREFNO,CARHARTIPI,CARHARKAYONC,CARHARKAYNAK,CARHARCARKOD,CARHARCARUNVAN,CARHARSIRANO,CARHARISTIPNO,CARHARISTIPKOD,CARHAREVRAKNO,CARHARACIKLAMA,CARHARGCFLAG,CARHARTUTAR,CARHARVADETAR,CARHARODENDI,CARHARKDVTUTAR,CARHARKALAN ) 
+ values ( @FaturaTarihi,@CARFISREFNO,4,2,3,@ErpCariKodu,@FatFisCarUnvan,1,1,'FATURA',@FaturaNumarasi,@FaturaNumarasi + ' NO''LU ALIM FAT.İLE',2,@OdenecekTutar,case when ISNULL(@VadeTarihi,'')='' then @FaturaTarihi else @VadeTarihi end,2,@VergiTutari,@OdenecekTutar )
+ insert into SIRKETLOG
+ ( SIRLOGMODUL,SIRLOGKONU,SIRLOGKYTTIPI,SIRLOGKYTREFNO,SIRLOGILKKULKOD,SIRLOGILKTAR,SIRLOGSONKULKOD,SIRLOGSONTAR ) 
+ values ( 3,2,3,@FatFisRefNo,@KonnektorKullaniciAdi,getdate(),@KonnektorKullaniciAdi,getdate() )
+ declare @CariBakiyeArttirma int 
+ set @CariBakiyeArttirma = case when @FATFTKOD = 'ALIM' then 0 --Cari Bakiyesini Azaltır
+							    when @FATFTKOD = 'GİDER' then 0 --Cari Bakiyesini Azaltır
+							    when @FATFTKOD = 'ALIM İADE' then 1 --Cari Bakiyesini Arttırır
+								else -1
+								end
+if @CariBakiyeArttirma = -1 begin RAISERROR ('Tanımsız Fatura Tipi!', 11,1) end
+update CARKART set 
+CARBORCTOP = (CARBORCTOP + (case when @CariBakiyeArttirma = 1 then @OdenecekTutar else 0 end)),
+CARALACAKTOP = (CARALACAKTOP + (case when @CariBakiyeArttirma = 0 then @OdenecekTutar else 0 end)),
+CARBAKIYE = (CARBAKIYE + (case when @CariBakiyeArttirma = 1 then @OdenecekTutar else -1 * @OdenecekTutar end))
+ where CARKOD = @ErpCariKodu
+ update FATFIS set 
+ FATFISSTKREFNO = @STKFISREFNO,
+ FATFISCARREFNO = @CARFISREFNO
+ where FATFISREFNO = @FatFisRefNo
+END
+set @DonusDegeri1=@FatFisRefNo
+set @DonusDegeri2 = @STKFISREFNO

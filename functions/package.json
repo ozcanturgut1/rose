@@ -18,7 +18,8 @@
     "eta:diagnose-refno": "node scripts/diagnoseEtaRefnoIssue.js",
     "eta:patch-procs-null-safe": "node scripts/patchEtaDenemeProceduresNullSafe.js",
     "eta:patch-fatura-tip-sp": "node scripts/patchSpFaturaKayitCariBakiyeAllTypes.js",
-    "eta:patch-fatura-detay-tip-sp": "node scripts/patchSpFaturaDetayKayitStokAllTypes.js"
+    "eta:patch-fatura-detay-tip-sp": "node scripts/patchSpFaturaDetayKayitStokAllTypes.js",
+    "eta:patch-muhasebe-tevkifat": "node scripts/patchSpFaturaMuhasebeBaglaTevkifat.js"
   },
   "engines": {
     "node": "22"
