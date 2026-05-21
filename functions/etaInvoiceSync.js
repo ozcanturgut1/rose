@@ -365,6 +365,61 @@ function codeSimilarity(a, b) {
   return 0;
 }
 
+/** Stok kartı ailesi öneki: A1, A3, B2 (STKKOD, "A3 75/72…" veya yalnızca "A3"). */
+function parseStokAilePrefix(text) {
+  const t = String(text || "").trim();
+  if (!t) return null;
+  const fromKod = t.match(/^([A-Za-z][0-9]?)-/i);
+  if (fromKod) return fromKod[1].toUpperCase();
+  const fromNote = t.match(/^([A-Za-z][0-9]?)\s+/);
+  if (fromNote) return fromNote[1].toUpperCase();
+  const exact = t.match(/^([A-Za-z][0-9]?)$/);
+  if (exact) return exact[1].toUpperCase();
+  return null;
+}
+
+/** Kullanıcı notu, satır açıklaması (A3 | …) veya description'dan aile öneki. */
+function stokAilePrefixFromLine(line) {
+  const sources = [
+    line?.kullaniciKalemAciklama,
+    line?.lineAciklama,
+    line?.description,
+  ];
+  for (const raw of sources) {
+    const t = String(raw || "").trim();
+    if (!t) continue;
+    const direct = parseStokAilePrefix(t);
+    if (direct) return direct;
+    const head = t.split("|")[0].trim();
+    const fromHead = parseStokAilePrefix(head);
+    if (fromHead) return fromHead;
+  }
+  return null;
+}
+
+function swapStokAilePrefix(stkKod, newPrefix) {
+  const k = String(stkKod || "").trim();
+  const p = String(newPrefix || "").trim().toUpperCase();
+  const m = k.match(/^([A-Za-z][0-9]?)-(.+)$/i);
+  if (!m || !p) return null;
+  return `${p}-${m[2]}`;
+}
+
+/** Geçmiş eşleşme A1 iken kullanıcı notu A3 ise STKKART'ta A3-{suffix} dene. */
+async function preferStockCodeForUserFamilyPrefix(wPool, stkKod, line) {
+  const code = String(stkKod || "").trim();
+  if (!code) return { code: null, remappedFrom: null };
+  const want = stokAilePrefixFromLine(line);
+  if (!want) return { code, remappedFrom: null };
+  const have = parseStokAilePrefix(code);
+  if (have === want) return { code, remappedFrom: null };
+  const alt = swapStokAilePrefix(code, want);
+  if (!alt) return { code, remappedFrom: null };
+  const resolved = await resolveWriteStockCodeExact(wPool, alt);
+  if (resolved) return { code: resolved, remappedFrom: code };
+  return { code, remappedFrom: null };
+}
+
 function scoreHistoricalMatch(targetLine, candidateLine) {
   const primaryAcik = primaryKalemAciklama(targetLine);
   const itemNameTxt = String(targetLine.itemCode ?? "").trim();
@@ -386,12 +441,17 @@ function scoreHistoricalMatch(targetLine, candidateLine) {
   const priceScore = hasPrice ? Math.max(0, 1 - relativeDiff(targetLine.unitPrice, candidateLine.unitPrice)) : 0;
   const weakDesc = isCodeLikeText(satirAcik || stokCinsiTxt);
   const hasUserNote = Boolean(String(targetLine.kullaniciKalemAciklama || "").trim());
-  const total = weakDesc
-    ? descScore * 0.25 + cinsiScore * 0.3 + codeScore * 0.35 + unitMatch * 0.03 + taxScore * 0.03 + priceScore * 0.04
-    : hasUserNote
-      ? descScore * 0.75 + cinsiScore * 0.12 + codeScore * 0.05 + unitMatch * 0.03 + taxScore * 0.03 + priceScore * 0.02
-      : descScore * 0.68 + cinsiScore * 0.17 + codeScore * 0.08 + unitMatch * 0.03 + taxScore * 0.02 + priceScore * 0.02;
-  return { total, descScore, cinsiScore, codeScore, unitMatch, taxScore, priceScore, weakDesc };
+  const userFam = stokAilePrefixFromLine(targetLine);
+  const candFam = parseStokAilePrefix(candidateLine.stkKod);
+  const familyBonus =
+    userFam && candFam ? (userFam === candFam ? 0.12 : -0.06) : 0;
+  const total =
+    (weakDesc
+      ? descScore * 0.25 + cinsiScore * 0.3 + codeScore * 0.35 + unitMatch * 0.03 + taxScore * 0.03 + priceScore * 0.04
+      : hasUserNote
+        ? descScore * 0.75 + cinsiScore * 0.12 + codeScore * 0.05 + unitMatch * 0.03 + taxScore * 0.03 + priceScore * 0.02
+        : descScore * 0.68 + cinsiScore * 0.17 + codeScore * 0.08 + unitMatch * 0.03 + taxScore * 0.02 + priceScore * 0.02) + familyBonus;
+  return { total, descScore, cinsiScore, codeScore, unitMatch, taxScore, priceScore, weakDesc, familyBonus };
 }
 
 function classifyInvoiceType(data) {
@@ -517,7 +577,7 @@ function applyKalemKullaniciAciklamalari(lines, afterData) {
 
 /**
  * Stok eşleştirmede birincil metin: kullanıcı kalem açıklaması → UBL stok cinsi → satır metni.
- * UBL `Item/Name` (itemCode) yalnızca başka metin yoksa veya kod benzeri ise kullanılır.
+ * UBL `Item/Name` stok cinsidir; eşleştirmede kullanıcı notu önceliklidir.
  */
 function primaryKalemAciklama(line) {
   const user = String(line?.kullaniciKalemAciklama || "").trim();
@@ -559,18 +619,18 @@ function extractInvoiceLines(data) {
     const sellerSku = ublItemIdentificationId(item.SellersItemIdentification);
     const buyerSku = ublItemIdentificationId(item.BuyersItemIdentification);
     const nameKod = textNode(item.Name).trim();
+    const descParts = collectItemDescriptions(item);
+    const descText = descParts.length ? descParts.join(" | ") : "";
     const noteParts = collectInvoiceLineNotes(line);
     const noteKod = noteParts.length ? noteParts.join(" | ") : "";
-    /** UBL `cbc:Name` → ETA stok kodu (STKKOD); boşsa `InvoiceLine.Note`. */
-    const itemCode = (nameKod || noteKod).slice(0, 40);
-    /** UBL `cbc:Note` (InvoiceLine) + `cbc:Name` (Item) → satır açıklaması. */
+    /** UBL `cbc:Name` → stok cinsi; `cbc:Description` → satır açıklaması. */
+    const stokCinsi = (nameKod || "").trim();
     const lineAciklamaParts = [];
+    if (descText) lineAciklamaParts.push(descText);
     if (noteKod) lineAciklamaParts.push(noteKod);
-    if (nameKod) lineAciklamaParts.push(nameKod);
     const lineAciklama = lineAciklamaParts.join(" | ");
-    const descParts = collectItemDescriptions(item);
-    /** UBL `cbc:Description` (Item) → stok cinsi. Boşsa `InvoiceLine.Note` fallback. */
-    const stokCinsi = (descParts.length ? descParts.join(" | ") : lineAciklama).trim();
+    /** Satıcı/alıcı kalem kodu; UBL Name artık stok kodu adayı değil. */
+    const itemCode = (sellerSku || buyerSku || "").slice(0, 40);
     const qtyNode = firstOf(line.InvoicedQuantity);
     const qty = parseNum(textNode(qtyNode), 1);
     const unit = (qtyNode && typeof qtyNode === "object" ? qtyNode["@_unitCode"] : null) || "AD";
@@ -587,8 +647,8 @@ function extractInvoiceLines(data) {
       ...(satirNo ? { satirNo } : {}),
       ...(sellerSku ? { saticiKalemKodu: sellerSku } : {}),
       ...(buyerSku ? { aliciKalemKodu: buyerSku } : {}),
-      ...(nameKod ? { aciklama: nameKod } : {}),
-      /** Geçmiş eşleştirme: satır açıklaması (FATHARACIKLAMA) ile karşılaştırma. */
+      ...(descText ? { aciklama: descText } : {}),
+      /** Geçmiş eşleştirme: FATHARACIKLAMA / STKCINSI ile karşılaştırma. */
       description: lineAciklama,
       stokCinsi,
       lineAciklama,
@@ -913,6 +973,47 @@ async function resolveWriteStockCodeExact(wPool, code) {
     .input("stk", sql.NVarChar(40), c)
     .query("SELECT TOP 1 STKKOD FROM dbo.STKKART WITH (NOLOCK) WHERE STKKOD=@stk");
   return rs.recordset[0]?.STKKOD || null;
+}
+
+/** Tedarikçi geçmişinden gelen STKKOD; kullanıcı aile öneki (A3 vb.) ile STKKART alternatifi. */
+async function resolveStockFromHistoryMatch(wPool, historyMatch, line, opts) {
+  const allowAutoStk = opts?.allowAutoStk !== false;
+  const stkTemplate = opts?.stkTemplate || "";
+  let matchSource = null;
+  let itemCodeResolved = null;
+  let stokFamilyRemapFrom = null;
+  if (!historyMatch?.stkkod) {
+    return { itemCodeResolved, matchSource, stokFamilyRemapFrom };
+  }
+
+  const rawHistory = String(historyMatch.stkkod || "").trim().slice(0, 40);
+  const { code: historyCode, remappedFrom } = await preferStockCodeForUserFamilyPrefix(
+    wPool,
+    rawHistory,
+    line
+  );
+  if (remappedFrom) stokFamilyRemapFrom = remappedFrom;
+
+  itemCodeResolved = await resolveWriteStockCodeExact(wPool, historyCode);
+  if (itemCodeResolved) {
+    matchSource = "supplier_history_match";
+  } else if (historyCode && allowAutoStk) {
+    try {
+      await tryCloneStkkartFromTemplate(
+        wPool,
+        historyCode,
+        String(historyMatch.stkcinsi || line.stokCinsi || historyCode).trim() || historyCode,
+        line.unit,
+        stkTemplate
+      );
+    } catch {
+      /* duplicate / şema */
+    }
+    itemCodeResolved = await resolveWriteStockCodeExact(wPool, historyCode);
+    if (itemCodeResolved) matchSource = "supplier_history_clone";
+  }
+
+  return { itemCodeResolved, matchSource, stokFamilyRemapFrom };
 }
 
 /**
@@ -1301,36 +1402,32 @@ export async function previewStockLineMatches(afterData) {
     let matchSource = null;
     let cinsiHit = null;
     const historyMatch = preMatchedHistories[i] ?? null;
+    let stokFamilyRemapFrom = null;
 
-    if (historyMatch?.stkkod) {
-      const historyCode = String(historyMatch.stkkod || "").trim().slice(0, 40);
-      itemCodeResolved = await resolveWriteStockCodeExact(wPool, historyCode);
-      if (itemCodeResolved) {
-        matchSource = "supplier_history_match";
-      } else if (historyCode && allowAutoStk) {
-        try {
-          await tryCloneStkkartFromTemplate(
-            wPool,
-            historyCode,
-            String(historyMatch.stkcinsi || l.stokCinsi || historyCode).trim() || historyCode,
-            l.unit,
-            stkTemplate
-          );
-        } catch {
-          /* duplicate */
-        }
-        itemCodeResolved = await resolveWriteStockCodeExact(wPool, historyCode);
-        if (itemCodeResolved) matchSource = "supplier_history_clone";
-      }
-    }
+    const histResolved = await resolveStockFromHistoryMatch(wPool, historyMatch, l, {
+      allowAutoStk,
+      stkTemplate,
+    });
+    itemCodeResolved = histResolved.itemCodeResolved;
+    matchSource = histResolved.matchSource;
+    stokFamilyRemapFrom = histResolved.stokFamilyRemapFrom;
+
     if (!itemCodeResolved) {
       const primaryAcik = primaryKalemAciklama(l);
       if (primaryAcik && !isCodeLikeText(primaryAcik)) {
         cinsiHit = await resolveWriteStockByStkcinsi(wPool, primaryAcik);
         if (cinsiHit?.stkkod) {
-          itemCodeResolved = cinsiHit.stkkod;
-          matchSource =
-            cinsiHit.mode === "exact" ? "stkkart_cinsi_exact" : "stkkart_cinsi_fuzzy";
+          let cinsiKod = cinsiHit.stkkod;
+          const fam = await preferStockCodeForUserFamilyPrefix(wPool, cinsiKod, l);
+          if (fam.remappedFrom) {
+            stokFamilyRemapFrom = fam.remappedFrom;
+            cinsiKod = fam.code || cinsiKod;
+          }
+          itemCodeResolved = await resolveWriteStockCodeExact(wPool, cinsiKod);
+          if (itemCodeResolved) {
+            matchSource =
+              cinsiHit.mode === "exact" ? "stkkart_cinsi_exact" : "stkkart_cinsi_fuzzy";
+          }
         }
       }
     }
@@ -1365,6 +1462,9 @@ export async function previewStockLineMatches(afterData) {
       primaryKalemAciklama: primaryKalemAciklama(l),
       rawItemCode: rawItemCode || null,
       historyCandidateStk: historyMatch?.stkkod || null,
+      ...(stokFamilyRemapFrom
+        ? { stokFamilyRemapFrom, stokFamilyRemapTo: itemCodeResolved }
+        : {}),
       historyScore: historyMatch?.score ?? null,
       cinsiMatchMode: cinsiHit?.mode || null,
       cinsiMatchScore: cinsiHit?.score ?? null,
@@ -1626,35 +1726,31 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
         refFatFisForMuhasebe = Number(historyMatch.refFatFisRefNo || 0) || 0;
       }
     }
-    if (historyMatch?.stkkod) {
-      const historyCode = String(historyMatch.stkkod || "").trim().slice(0, 40);
-      itemCodeResolved = await resolveWriteStockCodeExact(wPool, historyCode);
-      if (itemCodeResolved) {
-        matchSource = "supplier_history_match";
-      } else if (historyCode && allowAutoStk) {
-        try {
-          await tryCloneStkkartFromTemplate(
-            wPool,
-            historyCode,
-            String(historyMatch.stkcinsi || l.stokCinsi || historyCode).trim() || historyCode,
-            l.unit,
-            stkTemplate
-          );
-        } catch {
-          /* duplicate / şema */
-        }
-        itemCodeResolved = await resolveWriteStockCodeExact(wPool, historyCode);
-        if (itemCodeResolved) matchSource = "supplier_history_clone";
-      }
-    }
+    let stokFamilyRemapFrom = null;
+    const histResolved = await resolveStockFromHistoryMatch(wPool, historyMatch, l, {
+      allowAutoStk,
+      stkTemplate,
+    });
+    itemCodeResolved = histResolved.itemCodeResolved;
+    matchSource = histResolved.matchSource;
+    stokFamilyRemapFrom = histResolved.stokFamilyRemapFrom;
+
     if (!itemCodeResolved) {
       const primaryAcik = primaryKalemAciklama(l);
       if (primaryAcik && !isCodeLikeText(primaryAcik)) {
         const cinsiHit = await resolveWriteStockByStkcinsi(wPool, primaryAcik);
         if (cinsiHit?.stkkod) {
-          itemCodeResolved = cinsiHit.stkkod;
-          matchSource =
-            cinsiHit.mode === "exact" ? "stkkart_cinsi_exact" : "stkkart_cinsi_fuzzy";
+          let cinsiKod = cinsiHit.stkkod;
+          const fam = await preferStockCodeForUserFamilyPrefix(wPool, cinsiKod, l);
+          if (fam.remappedFrom) {
+            stokFamilyRemapFrom = fam.remappedFrom;
+            cinsiKod = fam.code || cinsiKod;
+          }
+          itemCodeResolved = await resolveWriteStockCodeExact(wPool, cinsiKod);
+          if (itemCodeResolved) {
+            matchSource =
+              cinsiHit.mode === "exact" ? "stkkart_cinsi_exact" : "stkkart_cinsi_fuzzy";
+          }
         }
       }
     }
@@ -1689,6 +1785,9 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
       lineNo: i + 1,
       source: matchSource || "unknown",
       selectedStkKod: itemCode,
+      ...(stokFamilyRemapFrom
+        ? { stokFamilyRemapFrom, stokFamilyRemapTo: itemCode }
+        : {}),
       score: historyMatch?.score || null,
       scoreBreakdown: historyMatch
         ? {
@@ -1796,7 +1895,12 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
         WHERE FATFISREFNO = @ref
       `);
   }
-  await tryAutoMuhasebeForDeneme(wPool, fatFisRefNo, { refFatFisRefNo: refFatFisForMuhasebe });
+  // ALIM (FATFISTIPI=1): muhasebe her zaman kalem bazlı; referans SP'ye gönderilmez.
+  const muhasebeRefForSp =
+    Number(erpFaturaTipiNo) === 1 ? 0 : refFatFisForMuhasebe;
+  await tryAutoMuhasebeForDeneme(wPool, fatFisRefNo, {
+    refFatFisRefNo: muhasebeRefForSp,
+  });
 
   const verify = await wPool
     .request()
@@ -1809,7 +1913,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     fatFisRefNo,
     stokFisRefNo,
     muhFisRefNo: verify.recordset[0]?.FATFISMUHREFNO || 0,
-    muhasebeRefFatFisRefNo: refFatFisForMuhasebe || 0,
+    muhasebeRefFatFisRefNo: muhasebeRefForSp || 0,
     erpCariKodu,
     cariResolveReason: cariResolved?.reason || null,
     lineCount: usableLines.length,

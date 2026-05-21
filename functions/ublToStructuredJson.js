@@ -58,6 +58,19 @@ function partyToTaraf(party) {
   return out;
 }
 
+function itemDescriptionJoined(item) {
+  if (!item?.Description) return null;
+  const d = item.Description;
+  const parts = [];
+  const push = (v) => {
+    const s = str(v);
+    if (s) parts.push(s);
+  };
+  if (Array.isArray(d)) d.forEach(push);
+  else push(d);
+  return parts.length ? parts.join(" | ") : null;
+}
+
 function invoiceLineToOzet(line) {
   if (!line) return null;
   const qty = line.InvoicedQuantity;
@@ -71,6 +84,7 @@ function invoiceLineToOzet(line) {
     currencyID: amount?.["@_currencyID"] || null,
     Item: item ? {
       Name: str(item.Name),
+      Description: itemDescriptionJoined(item),
       SellersItemIdentification: str(item.SellersItemIdentification?.ID),
       BuyersItemIdentification: str(item.BuyersItemIdentification?.ID),
     } : null,

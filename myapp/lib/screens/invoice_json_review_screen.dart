@@ -108,11 +108,18 @@ String kalemSatirAnahtari(Map<String, dynamic> row, int index) {
   if (buyer != null && buyer.isNotEmpty) {
     return 'sku_buyer_${buyer.length > 100 ? buyer.substring(0, 100) : buyer}';
   }
-  var name = row['aciklama']?.toString().trim();
+  var name = row['stokCinsi']?.toString().trim();
+  if (name == null || name.isEmpty) {
+    name = row['aciklama']?.toString().trim();
+  }
   if (name == null || name.isEmpty) {
     final hucre = row['_ublHucreleri'];
     if (hucre is Map) {
-      name = Map<String, dynamic>.from(hucre)['Item/Name']?.toString().trim();
+      final hm = Map<String, dynamic>.from(hucre);
+      name = hm['Item/Name']?.toString().trim();
+      if (name == null || name.isEmpty) {
+        name = hm['Item/Description']?.toString().trim();
+      }
     }
   }
   if (name != null && name.isNotEmpty) {
@@ -134,11 +141,15 @@ String kalemEtiket(Map<String, dynamic> row, int index) {
   } else {
     parts.add('Kalem ${index + 1}');
   }
-  var name = row['aciklama']?.toString().trim();
+  var name = row['stokCinsi']?.toString().trim();
+  if (name == null || name.isEmpty) {
+    name = row['aciklama']?.toString().trim();
+  }
   if (name == null || name.isEmpty) {
     final hucre = row['_ublHucreleri'];
     if (hucre is Map) {
-      name = Map<String, dynamic>.from(hucre)['Item/Name']?.toString().trim();
+      final hm = Map<String, dynamic>.from(hucre);
+      name = hm['Item/Name']?.toString().trim();
     }
   }
   if (name != null && name.isNotEmpty) parts.add(name);
@@ -337,12 +348,14 @@ String? _gelisTarihi(Map<String, dynamic> data) {
 
 Map<String, dynamic> _kalemFromBelgeOzetInvoiceLine(Map<String, dynamic> line) {
   final item = line['Item'];
-  String ad = '';
+  String stokCinsi = '';
+  String aciklama = '';
   String? sellerSku;
   String? buyerSku;
   if (item is Map) {
     final im = Map<String, dynamic>.from(item);
-    ad = im['Name']?.toString().trim() ?? '';
+    stokCinsi = im['Name']?.toString().trim() ?? '';
+    aciklama = im['Description']?.toString().trim() ?? '';
     final s = im['SellersItemIdentification'];
     final b = im['BuyersItemIdentification'];
     sellerSku = s?.toString().trim();
@@ -370,7 +383,8 @@ Map<String, dynamic> _kalemFromBelgeOzetInvoiceLine(Map<String, dynamic> line) {
 
   return <String, dynamic>{
     if (lineId != null && lineId.isNotEmpty) 'satirNo': lineId,
-    if (ad.isNotEmpty) 'aciklama': ad,
+    if (stokCinsi.isNotEmpty) 'stokCinsi': stokCinsi,
+    if (aciklama.isNotEmpty) 'aciklama': aciklama,
     if (sellerSku != null && sellerSku.isNotEmpty) 'saticiKalemKodu': sellerSku,
     if (buyerSku != null && buyerSku.isNotEmpty) 'aliciKalemKodu': buyerSku,
     if (line['InvoicedQuantity'] != null) 'miktar': line['InvoicedQuantity'],
@@ -696,9 +710,12 @@ List<Map<String, dynamic>> _faturaKalemleri(Map<String, dynamic> data) {
   final out = <Map<String, dynamic>>[];
   for (final line in lines) {
     final itemRaw = _ublFirst(line['Item']);
-    var name = '';
+    var stokCinsi = '';
+    var descText = '';
     if (itemRaw is Map) {
-      name = _ublXmlScalarText(Map<String, dynamic>.from(itemRaw)['Name'])?.trim() ?? '';
+      final im = Map<String, dynamic>.from(itemRaw);
+      stokCinsi = _ublXmlScalarText(im['Name'])?.trim() ?? '';
+      descText = _ublItemDescriptionText(im['Description'])?.trim() ?? '';
     }
     final lineId = _ublXmlScalarText(line['ID'])?.trim();
     String? sellerId;
@@ -750,9 +767,14 @@ List<Map<String, dynamic>> _faturaKalemleri(Map<String, dynamic> data) {
     }
     final vergiMap = _ublInvoiceLineVergiOzet(line, docCur);
     final ublHucreleri = _flattenUblInvoiceLineForTablo(line, docCur);
+    final aciklamaParts = <String>[];
+    if (descText.isNotEmpty) aciklamaParts.add(descText);
+    if (satirNotlari.isNotEmpty) aciklamaParts.add(satirNotlari.join(' | '));
+    final aciklama = aciklamaParts.join(' | ');
     out.add(<String, dynamic>{
       if (lineId != null && lineId.isNotEmpty) 'satirNo': lineId,
-      if (name.isNotEmpty) 'aciklama': name,
+      if (stokCinsi.isNotEmpty) 'stokCinsi': stokCinsi,
+      if (aciklama.isNotEmpty) 'aciklama': aciklama,
       if (sellerId != null && sellerId.isNotEmpty) 'saticiKalemKodu': sellerId,
       if (buyerId != null && buyerId.isNotEmpty) 'aliciKalemKodu': buyerId,
       if (satirNotlari.isNotEmpty) 'satirNotlari': satirNotlari,
@@ -1120,6 +1142,8 @@ class InvoiceJsonReviewScreen extends StatefulWidget {
 class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
   late final Future<Map<String, dynamic>> _summaryFuture;
   final TextEditingController _noteCtrl = TextEditingController();
+  final GlobalKey<_KalemKullaniciAciklamaPanelState> _kalemAciklamaPanelKey =
+      GlobalKey<_KalemKullaniciAciklamaPanelState>();
   bool _saving = false;
 
   /// Muhasebe: yalnızca önizleme; açıklama ve Onayla/Reddet yok ([InvoicePdfReviewScreen] ile aynı).
@@ -1166,6 +1190,23 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
     if (_saving) return;
     setState(() => _saving = true);
     try {
+      final kalemState = _kalemAciklamaPanelKey.currentState;
+      if (kalemState != null) {
+        final kalemOk = await kalemState.saveAllPending();
+        if (!kalemOk) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text(
+                  'Kalem açıklamaları kaydedilemedi. Onay işlemi iptal edildi.',
+                ),
+              ),
+            );
+          }
+          return;
+        }
+      }
+
       await widget.api.updateQnbInvoiceYonetimOnay(
         docId: _invoiceDocId,
         decision: decision,
@@ -1437,6 +1478,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                   child: _KalemKullaniciAciklamaPanel(
+                    key: _kalemAciklamaPanelKey,
                     invoiceDocId: _invoiceDocId,
                     kalemler: (f['kalemler'] as List<dynamic>? ?? [])
                         .whereType<Map>()
@@ -1973,6 +2015,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
 /// Fatura kalemleri için isteğe bağlı kullanıcı açıklaması (Firestore `kalemKullaniciAciklamalari`).
 class _KalemKullaniciAciklamaPanel extends StatefulWidget {
   const _KalemKullaniciAciklamaPanel({
+    super.key,
     required this.invoiceDocId,
     required this.kalemler,
     required this.kayitlar,
@@ -1991,6 +2034,7 @@ class _KalemKullaniciAciklamaPanelState extends State<_KalemKullaniciAciklamaPan
   late final List<String> _etiketler;
   late final Map<String, TextEditingController> _controllers;
   final Set<String> _savingKeys = {};
+  bool _savingAll = false;
 
   @override
   void initState() {
@@ -2021,8 +2065,54 @@ class _KalemKullaniciAciklamaPanelState extends State<_KalemKullaniciAciklamaPan
     super.dispose();
   }
 
+  String _kayitliAciklama(String key) {
+    final prev = widget.kayitlar[key];
+    if (prev is Map) return prev['aciklama']?.toString().trim() ?? '';
+    return '';
+  }
+
+  /// Firestore güncellemesi için değişen kalemler (tek update).
+  Map<String, dynamic> _buildPendingKalemPatch() {
+    final patch = <String, dynamic>{};
+    for (var i = 0; i < _keys.length; i++) {
+      final key = _keys[i];
+      final aciklama = _controllers[key]!.text.trim();
+      if (aciklama == _kayitliAciklama(key)) continue;
+      final field = 'kalemKullaniciAciklamalari.$key';
+      if (aciklama.isEmpty) {
+        patch[field] = FieldValue.delete();
+      } else {
+        patch[field] = {
+          'etiket': _etiketler[i],
+          'aciklama': aciklama,
+          'guncelleme': FieldValue.serverTimestamp(),
+        };
+      }
+    }
+    return patch;
+  }
+
+  /// Onaya Sun / Onayla / Reddet öncesi: kaydedilmemiş tüm kalem notlarını yazar.
+  Future<bool> saveAllPending() async {
+    if (_savingAll) return false;
+    final patch = _buildPendingKalemPatch();
+    if (patch.isEmpty) return true;
+
+    setState(() => _savingAll = true);
+    try {
+      final ref =
+          FirebaseFirestore.instance.collection('qnb_invoices').doc(widget.invoiceDocId);
+      await ref.update(patch);
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      if (mounted) setState(() => _savingAll = false);
+    }
+  }
+
   Future<void> _kaydet(String key, String etiket) async {
-    if (_savingKeys.contains(key)) return;
+    if (_savingKeys.contains(key) || _savingAll) return;
     setState(() => _savingKeys.add(key));
     try {
       final aciklama = _controllers[key]!.text.trim();
@@ -2079,7 +2169,7 @@ class _KalemKullaniciAciklamaPanelState extends State<_KalemKullaniciAciklamaPan
         ),
         const SizedBox(height: 4),
         Text(
-          'Açıklamalar bu faturanın kalemiyle birlikte kaydedilir. ETA stok kodu seçiminde birincil kriter olarak kullanılır; stok kartı cinsi ile tam veya benzerlik (esnek) eşleşme aranır.',
+          'Açıklamalar bu faturanın kalemiyle birlikte kaydedilir. Onaya Sun, Onayla veya Reddet\'e basıldığında kaydedilmemiş notlar otomatik yazılır. ETA stok kodu seçiminde birincil kriter olarak kullanılır.',
           style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant, height: 1.3),
         ),
         const SizedBox(height: 12),
@@ -2089,7 +2179,7 @@ class _KalemKullaniciAciklamaPanelState extends State<_KalemKullaniciAciklamaPan
             context,
             etiket: _etiketler[i],
             controller: _controllers[_keys[i]]!,
-            saving: _savingKeys.contains(_keys[i]),
+            saving: _savingKeys.contains(_keys[i]) || _savingAll,
             onKaydet: () => _kaydet(_keys[i], _etiketler[i]),
           ),
         ],

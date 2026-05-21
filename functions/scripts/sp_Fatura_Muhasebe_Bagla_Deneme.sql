@@ -129,8 +129,8 @@ BEGIN
 
   SET @isAlisLike = CASE WHEN @FatTip IN (1, 8, 9, 11) THEN 1 ELSE 0 END;
 
-  /* --- Referans fatura: tevkifatlı ise hesap kodları korunur, tutarlar KDV bölünmesine göre yazılır --- */
-  IF @RefFatFisRefNo IS NOT NULL AND @RefFatFisRefNo > 0
+  /* --- Referans fatura (ALIM hariç): tevkifatlı ise hesap kodları korunur --- */
+  IF @RefFatFisRefNo IS NOT NULL AND @RefFatFisRefNo > 0 AND @FatTip <> 1
   BEGIN
     DECLARE @RefMuh INT = (
       SELECT TOP 1 ISNULL(FATFISMUHREFNO, 0)
@@ -481,7 +481,166 @@ BEGIN
 
   IF @isAlisLike = 1
   BEGIN
-    IF @hasTevkifat = 1
+    IF @FatTip = 1
+    BEGIN
+      /* ALIM (FATFISTIPI=1): referans olsa da kalem bazlı STKMUHBAGLANTI */
+      DECLARE
+        @LnSira INT,
+        @LnStk VARCHAR(40),
+        @LnAcik VARCHAR(120),
+        @LnMal DECIMAL(28, 9),
+        @LnAccMal VARCHAR(40),
+        @MuhSira INT = 0;
+
+      DECLARE curFathar CURSOR LOCAL FAST_FORWARD FOR
+        SELECT
+          H.FATHARSIRANO,
+          NULLIF(LTRIM(RTRIM(H.FATHARSTKKOD)), ''),
+          ISNULL(
+            NULLIF(LTRIM(RTRIM(H.FATHARACIKLAMA)), ''),
+            ISNULL(NULLIF(LTRIM(RTRIM(H.FATHARSTKCINS)), ''), @EvrakNo)
+          ),
+          ROUND(ISNULL(H.FATHARNETTUTAR, ISNULL(H.FATHARKDVMATRAH, H.FATHARTUTAR)), 2)
+        FROM dbo.FATHAR H WITH (NOLOCK)
+        WHERE H.FATHARREFNO = @FatFisRefNo
+          AND ISNULL(NULLIF(LTRIM(RTRIM(H.FATHARSTKKOD)), ''), '') <> ''
+        ORDER BY H.FATHARSIRANO;
+
+      OPEN curFathar;
+      FETCH NEXT FROM curFathar INTO @LnSira, @LnStk, @LnAcik, @LnMal;
+      WHILE @@FETCH_STATUS = 0
+      BEGIN
+        SET @LnAccMal = NULL;
+
+        SELECT TOP 1 @LnAccMal = NULLIF(LTRIM(RTRIM(B.SMBMUHKOD1)), '')
+        FROM dbo.STKMUHBAGLANTI B WITH (NOLOCK)
+        WHERE B.SMBSTKKOD = @LnStk
+          AND B.SMBFTNO = @FatTip
+          AND ISNULL(NULLIF(LTRIM(RTRIM(B.SMBMUHKOD1)), ''), '') <> '';
+
+        IF @LnAccMal IS NULL
+          SELECT TOP 1 @LnAccMal = NULLIF(LTRIM(RTRIM(B.SMBMUHKOD1)), '')
+          FROM dbo.STKMUHBAGLANTI B WITH (NOLOCK)
+          WHERE B.SMBSTKKOD = @LnStk
+            AND ISNULL(NULLIF(LTRIM(RTRIM(B.SMBMUHKOD1)), ''), '') <> ''
+            AND (
+              (@isAlisLike = 1 AND B.SMBFTNO IN (1, 8, 9, 11))
+              OR (@isAlisLike = 0 AND B.SMBFTNO NOT IN (1, 8, 9, 11))
+            );
+
+        IF @LnAccMal IS NULL
+          SELECT TOP 1 @LnAccMal = NULLIF(LTRIM(RTRIM(FMGMUHKOD1)), '')
+          FROM dbo.FATMUHGRUP WITH (NOLOCK)
+          WHERE FMGGRUPKOD = 'FATMUHGRP'
+            AND FMGISLEMNO = @FatTip
+            AND ISNULL(NULLIF(LTRIM(RTRIM(FMGMUHKOD1)), ''), '') <> '';
+
+        IF @LnAccMal IS NULL
+          SELECT TOP 1 @LnAccMal = NULLIF(LTRIM(RTRIM(FMGMUHKOD1)), '')
+          FROM dbo.FATMUHGRUP WITH (NOLOCK)
+          WHERE FMGGRUPKOD = 'FATMUHGRP' AND FMGISLEMNO IN (61, 59)
+            AND (
+              (@isAlisLike = 1 AND FMGISLEMNO = 61)
+              OR (@isAlisLike = 0 AND FMGISLEMNO = 59)
+            );
+
+        IF @LnAccMal IS NULL
+          SET @LnAccMal = '153';
+
+        IF @LnMal > 0
+        BEGIN
+          SET @MuhSira = @MuhSira + 1;
+          INSERT INTO dbo.MUHHAR (
+            MUHHARTAR, MUHHARREFNO, MUHHARSIRANO, MUHHARMUHKOD, MUHHARTUTAR, MUHHARBATIPI,
+            MUHHAREVRAKNO, MUHHARACIKLAMA, MUHHARKAYITONC, MUHHARKAYNAK, MUHHARBELTUR, MUHHARCINSI, MUHHARYEVNO
+          )
+          VALUES (
+            @FisTar, @MuhFisRefNo, @MuhSira, @LnAccMal, @LnMal, 1,
+            @EvrakNo, @LnAcik, @MuhKayitOnc, 3, 'FAT', 1, 0
+          );
+        END;
+
+        FETCH NEXT FROM curFathar INTO @LnSira, @LnStk, @LnAcik, @LnMal;
+      END;
+      CLOSE curFathar;
+      DEALLOCATE curFathar;
+
+      IF @MuhSira = 0
+      BEGIN
+        SET @MuhSira = 1;
+        INSERT INTO dbo.MUHHAR (
+          MUHHARTAR, MUHHARREFNO, MUHHARSIRANO, MUHHARMUHKOD, MUHHARTUTAR, MUHHARBATIPI,
+          MUHHAREVRAKNO, MUHHARACIKLAMA, MUHHARKAYITONC, MUHHARKAYNAK, MUHHARBELTUR, MUHHARCINSI, MUHHARYEVNO
+        )
+        VALUES (
+          @FisTar, @MuhFisRefNo, @MuhSira, @AccMal, @MalTop, 1,
+          @EvrakNo, @LineAciklama, @MuhKayitOnc, 3, 'FAT', 1, 0
+        );
+      END;
+
+      IF @hasTevkifat = 1
+      BEGIN
+        DECLARE @AccTev191Alim VARCHAR(40) = '191 109 10';
+        SET @MuhSira = @MuhSira + 1;
+        INSERT INTO dbo.MUHHAR (
+          MUHHARTAR, MUHHARREFNO, MUHHARSIRANO, MUHHARMUHKOD, MUHHARTUTAR, MUHHARBATIPI,
+          MUHHAREVRAKNO, MUHHARACIKLAMA, MUHHARKAYITONC, MUHHARKAYNAK, MUHHARBELTUR, MUHHARCINSI, MUHHARYEVNO
+        )
+        VALUES (
+          @FisTar, @MuhFisRefNo, @MuhSira, @AccKdvInd, @KdvIndirilecek, 1,
+          @EvrakNo, @LineAciklama, @MuhKayitOnc, 3, 'FAT', 1, 0
+        );
+        SET @MuhSira = @MuhSira + 1;
+        INSERT INTO dbo.MUHHAR (
+          MUHHARTAR, MUHHARREFNO, MUHHARSIRANO, MUHHARMUHKOD, MUHHARTUTAR, MUHHARBATIPI,
+          MUHHAREVRAKNO, MUHHARACIKLAMA, MUHHARKAYITONC, MUHHARKAYNAK, MUHHARBELTUR, MUHHARCINSI, MUHHARYEVNO
+        )
+        VALUES (
+          @FisTar, @MuhFisRefNo, @MuhSira, @AccTev191Alim, @TevTutar, 1,
+          @EvrakNo, @LineAciklama, @MuhKayitOnc, 3, 'FAT', 1, 0
+        );
+        SET @MuhSira = @MuhSira + 1;
+        INSERT INTO dbo.MUHHAR (
+          MUHHARTAR, MUHHARREFNO, MUHHARSIRANO, MUHHARMUHKOD, MUHHARTUTAR, MUHHARBATIPI,
+          MUHHAREVRAKNO, MUHHARACIKLAMA, MUHHARKAYITONC, MUHHARKAYNAK, MUHHARBELTUR, MUHHARCINSI, MUHHARYEVNO
+        )
+        VALUES (
+          @FisTar, @MuhFisRefNo, @MuhSira, @AccCari, @GenTop, 2,
+          @EvrakNo, @LineAciklama, @MuhKayitOnc, 3, 'FAT', 1, 0
+        );
+        SET @MuhSira = @MuhSira + 1;
+        INSERT INTO dbo.MUHHAR (
+          MUHHARTAR, MUHHARREFNO, MUHHARSIRANO, MUHHARMUHKOD, MUHHARTUTAR, MUHHARBATIPI,
+          MUHHAREVRAKNO, MUHHARACIKLAMA, MUHHARKAYITONC, MUHHARKAYNAK, MUHHARBELTUR, MUHHARCINSI, MUHHARYEVNO
+        )
+        VALUES (
+          @FisTar, @MuhFisRefNo, @MuhSira, @AccTev360, @TevTutar, 2,
+          @EvrakNo, @LineAciklama, @MuhKayitOnc, 3, 'FAT', 1, 0
+        );
+      END
+      ELSE
+      BEGIN
+        SET @MuhSira = @MuhSira + 1;
+        INSERT INTO dbo.MUHHAR (
+          MUHHARTAR, MUHHARREFNO, MUHHARSIRANO, MUHHARMUHKOD, MUHHARTUTAR, MUHHARBATIPI,
+          MUHHAREVRAKNO, MUHHARACIKLAMA, MUHHARKAYITONC, MUHHARKAYNAK, MUHHARBELTUR, MUHHARCINSI, MUHHARYEVNO
+        )
+        VALUES (
+          @FisTar, @MuhFisRefNo, @MuhSira, @AccKdv, @KdvTop, 1,
+          @EvrakNo, @LineAciklama, @MuhKayitOnc, 3, 'FAT', 1, 0
+        );
+        SET @MuhSira = @MuhSira + 1;
+        INSERT INTO dbo.MUHHAR (
+          MUHHARTAR, MUHHARREFNO, MUHHARSIRANO, MUHHARMUHKOD, MUHHARTUTAR, MUHHARBATIPI,
+          MUHHAREVRAKNO, MUHHARACIKLAMA, MUHHARKAYITONC, MUHHARKAYNAK, MUHHARBELTUR, MUHHARCINSI, MUHHARYEVNO
+        )
+        VALUES (
+          @FisTar, @MuhFisRefNo, @MuhSira, @AccCari, @GenTop, 2,
+          @EvrakNo, @LineAciklama, @MuhKayitOnc, 3, 'FAT', 1, 0
+        );
+      END;
+    END
+    ELSE IF @hasTevkifat = 1
     BEGIN
       DECLARE @AccTev191 VARCHAR(40) = '191 109 10';
       INSERT INTO dbo.MUHHAR (
@@ -497,6 +656,7 @@ BEGIN
     END
     ELSE
     BEGIN
+      /* Diğer alış benzeri tipler (8,9,11 vb.): tek mal satırı */
       INSERT INTO dbo.MUHHAR (
         MUHHARTAR, MUHHARREFNO, MUHHARSIRANO, MUHHARMUHKOD, MUHHARTUTAR, MUHHARBATIPI,
         MUHHAREVRAKNO, MUHHARACIKLAMA, MUHHARKAYITONC, MUHHARKAYNAK, MUHHARBELTUR, MUHHARCINSI, MUHHARYEVNO
