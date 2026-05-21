@@ -96,6 +96,60 @@ String _kalemUblSutunBasligiTr(String anahtar) {
   return tr[anahtar] ?? anahtar;
 }
 
+/// Firestore `kalemKullaniciAciklamalari` anahtarı ([etaInvoiceSync.js] ile uyumlu).
+String kalemSatirAnahtari(Map<String, dynamic> row, int index) {
+  final satirNo = row['satirNo']?.toString().trim();
+  if (satirNo != null && satirNo.isNotEmpty) return 'satir_$satirNo';
+  final seller = row['saticiKalemKodu']?.toString().trim();
+  if (seller != null && seller.isNotEmpty) {
+    return 'sku_seller_${seller.length > 100 ? seller.substring(0, 100) : seller}';
+  }
+  final buyer = row['aliciKalemKodu']?.toString().trim();
+  if (buyer != null && buyer.isNotEmpty) {
+    return 'sku_buyer_${buyer.length > 100 ? buyer.substring(0, 100) : buyer}';
+  }
+  var name = row['aciklama']?.toString().trim();
+  if (name == null || name.isEmpty) {
+    final hucre = row['_ublHucreleri'];
+    if (hucre is Map) {
+      name = Map<String, dynamic>.from(hucre)['Item/Name']?.toString().trim();
+    }
+  }
+  if (name != null && name.isNotEmpty) {
+    final slug = name
+        .replaceAll(RegExp(r'[^\p{L}\p{N}._-]+', unicode: true), '_')
+        .replaceAll(RegExp(r'_+'), '_');
+    final cut = slug.length > 80 ? slug.substring(0, 80) : slug;
+    if (cut.isNotEmpty) return 'ad_$cut';
+  }
+  return 'idx_$index';
+}
+
+/// Kullanıcıya gösterilen kalem etiketi (kayıtta saklanır).
+String kalemEtiket(Map<String, dynamic> row, int index) {
+  final parts = <String>[];
+  final sn = row['satirNo']?.toString().trim();
+  if (sn != null && sn.isNotEmpty) {
+    parts.add('Satır $sn');
+  } else {
+    parts.add('Kalem ${index + 1}');
+  }
+  var name = row['aciklama']?.toString().trim();
+  if (name == null || name.isEmpty) {
+    final hucre = row['_ublHucreleri'];
+    if (hucre is Map) {
+      name = Map<String, dynamic>.from(hucre)['Item/Name']?.toString().trim();
+    }
+  }
+  if (name != null && name.isNotEmpty) parts.add(name);
+  return parts.join(' — ');
+}
+
+Map<String, dynamic> _parseKalemKullaniciAciklamalari(dynamic raw) {
+  if (raw is! Map) return {};
+  return Map<String, dynamic>.from(raw);
+}
+
 String? _ublAllowanceChargeOzeti(dynamic raw) {
   if (raw == null) return null;
   final parts = <String>[];
@@ -1239,6 +1293,9 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
       'tutarSatirlari': _tutarOzetiSatirlari(invData),
       'faturaNotlari': _faturaBelgeNotlari(invData),
       'kalemler': _faturaKalemleri(invData),
+      'kalemKullaniciAciklamalari': _parseKalemKullaniciAciklamalari(
+        invData['kalemKullaniciAciklamalari'],
+      ),
       'onayAciklamalarText': onayAcikText,
       if (ettnStr != null && ettnStr.isNotEmpty) 'ettn': ettnStr,
       if (onayDurumuStr != null && onayDurumuStr.isNotEmpty) 'onayDurumu': onayDurumuStr,
@@ -1372,6 +1429,23 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
                   child: _buildKalemTablosu(context, f['kalemler'] as List<dynamic>? ?? []),
+                ),
+              ),
+              const SizedBox(height: 8),
+              _ozetCard(
+                context,
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  child: _KalemKullaniciAciklamaPanel(
+                    invoiceDocId: _invoiceDocId,
+                    kalemler: (f['kalemler'] as List<dynamic>? ?? [])
+                        .whereType<Map>()
+                        .map((e) => Map<String, dynamic>.from(e))
+                        .toList(),
+                    kayitlar: _parseKalemKullaniciAciklamalari(
+                      f['kalemKullaniciAciklamalari'],
+                    ),
+                  ),
                 ),
               ),
               const SizedBox(height: 16),
@@ -1894,4 +1968,193 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
     );
   }
 
+}
+
+/// Fatura kalemleri için isteğe bağlı kullanıcı açıklaması (Firestore `kalemKullaniciAciklamalari`).
+class _KalemKullaniciAciklamaPanel extends StatefulWidget {
+  const _KalemKullaniciAciklamaPanel({
+    required this.invoiceDocId,
+    required this.kalemler,
+    required this.kayitlar,
+  });
+
+  final String invoiceDocId;
+  final List<Map<String, dynamic>> kalemler;
+  final Map<String, dynamic> kayitlar;
+
+  @override
+  State<_KalemKullaniciAciklamaPanel> createState() => _KalemKullaniciAciklamaPanelState();
+}
+
+class _KalemKullaniciAciklamaPanelState extends State<_KalemKullaniciAciklamaPanel> {
+  late final List<String> _keys;
+  late final List<String> _etiketler;
+  late final Map<String, TextEditingController> _controllers;
+  final Set<String> _savingKeys = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _keys = [];
+    _etiketler = [];
+    _controllers = {};
+    for (var i = 0; i < widget.kalemler.length; i++) {
+      final row = widget.kalemler[i];
+      final key = kalemSatirAnahtari(row, i);
+      final etiket = kalemEtiket(row, i);
+      _keys.add(key);
+      _etiketler.add(etiket);
+      final prev = widget.kayitlar[key];
+      var metin = '';
+      if (prev is Map) {
+        metin = prev['aciklama']?.toString() ?? '';
+      }
+      _controllers[key] = TextEditingController(text: metin);
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final c in _controllers.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _kaydet(String key, String etiket) async {
+    if (_savingKeys.contains(key)) return;
+    setState(() => _savingKeys.add(key));
+    try {
+      final aciklama = _controllers[key]!.text.trim();
+      final ref = FirebaseFirestore.instance.collection('qnb_invoices').doc(widget.invoiceDocId);
+      if (aciklama.isEmpty) {
+        await ref.update({
+          'kalemKullaniciAciklamalari.$key': FieldValue.delete(),
+        });
+      } else {
+        await ref.set(
+          {
+            'kalemKullaniciAciklamalari': {
+              key: {
+                'etiket': etiket,
+                'aciklama': aciklama,
+                'guncelleme': FieldValue.serverTimestamp(),
+              },
+            },
+          },
+          SetOptions(merge: true),
+        );
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(aciklama.isEmpty ? 'Kalem açıklaması silindi.' : 'Kalem açıklaması kaydedildi.'),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Kayıt hatası: $e'), backgroundColor: Theme.of(context).colorScheme.error),
+      );
+    } finally {
+      if (mounted) setState(() => _savingKeys.remove(key));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.kalemler.isEmpty) return const SizedBox.shrink();
+
+    final cs = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'Kalem açıklamaları (isteğe bağlı)',
+          style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.w600,
+                color: cs.primary,
+              ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Açıklamalar bu faturanın kalemiyle birlikte kaydedilir. ETA stok kodu seçiminde birincil kriter olarak kullanılır; stok kartı cinsi ile tam veya benzerlik (esnek) eşleşme aranır.',
+          style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant, height: 1.3),
+        ),
+        const SizedBox(height: 12),
+        for (var i = 0; i < widget.kalemler.length; i++) ...[
+          if (i > 0) const SizedBox(height: 10),
+          _kalemAciklamaSatiri(
+            context,
+            etiket: _etiketler[i],
+            controller: _controllers[_keys[i]]!,
+            saving: _savingKeys.contains(_keys[i]),
+            onKaydet: () => _kaydet(_keys[i], _etiketler[i]),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _kalemAciklamaSatiri(
+    BuildContext context, {
+    required String etiket,
+    required TextEditingController controller,
+    required bool saving,
+    required VoidCallback onKaydet,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border.all(color: cs.outline.withValues(alpha: 0.35)),
+        borderRadius: BorderRadius.circular(8),
+        color: cs.surface.withValues(alpha: 0.6),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              etiket,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: cs.onSurface,
+              ),
+            ),
+            const SizedBox(height: 6),
+            TextField(
+              controller: controller,
+              minLines: 1,
+              maxLines: 4,
+              decoration: const InputDecoration(
+                isDense: true,
+                hintText: 'Bu kalem için not / açıklama (isteğe bağlı)',
+                border: OutlineInputBorder(),
+                contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              ),
+              onSubmitted: (_) => onKaydet(),
+            ),
+            const SizedBox(height: 6),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed: saving ? null : onKaydet,
+                icon: saving
+                    ? SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: cs.primary),
+                      )
+                    : const Icon(Icons.save_outlined, size: 18),
+                label: const Text('Kaydet'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
