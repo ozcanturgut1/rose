@@ -793,15 +793,82 @@ List<Map<String, dynamic>> _faturaKalemleri(Map<String, dynamic> data) {
   return out;
 }
 
+/// İrsaliye satırı: UBL `Note` ve `Item/Description` birleşik metin.
+String? _despatchLineSatirAciklamasi(Map<String, dynamic> line) {
+  final parts = <String>[];
+  void add(String? s) {
+    final t = s?.trim();
+    if (t == null || t.isEmpty) return;
+    if (!parts.contains(t)) parts.add(t);
+  }
+
+  for (final n in _ublInvoiceLineNotes(line['Note'])) {
+    add(n);
+  }
+
+  final item = line['Item'];
+  if (item is Map) {
+    final im = Map<String, dynamic>.from(item);
+    add(im['Description']?.toString());
+    add(_ublItemDescriptionText(im['Description']));
+  }
+
+  if (parts.isEmpty) return null;
+  return parts.join(' | ');
+}
+
+List<Map<String, dynamic>> _irsaliyeUblDespatchLines(Map<String, dynamic> data) {
+  final upRaw = data['ublParsed'];
+  if (upRaw is! Map) return [];
+  final up = Map<String, dynamic>.from(upRaw);
+  final daRaw = up['DespatchAdvice'];
+  if (daRaw is! Map) return [];
+  final da = Map<String, dynamic>.from(daRaw);
+  final linesRaw = da['DespatchLine'];
+  if (linesRaw == null) return [];
+  return linesRaw is List
+      ? linesRaw.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
+      : [Map<String, dynamic>.from(linesRaw as Map)];
+}
+
+void _irsaliyeKalemlerineSatirAciklamasiEkle(
+  List<Map<String, dynamic>> rows,
+  List<Map<String, dynamic>> ublLines,
+) {
+  if (rows.isEmpty || ublLines.isEmpty) return;
+  for (var i = 0; i < rows.length; i++) {
+    final existing = rows[i]['satirAciklama']?.toString().trim();
+    if (existing != null && existing.isNotEmpty) continue;
+    if (i >= ublLines.length) break;
+    final acik = _despatchLineSatirAciklamasi(ublLines[i]);
+    if (acik != null && acik.isNotEmpty) rows[i]['satirAciklama'] = acik;
+  }
+}
+
 Map<String, dynamic> _kalemDespatchBelgeOzet(Map<String, dynamic> line) {
   final item = line['Item'];
   String ad = '';
   if (item is Map) {
     ad = item['Name']?.toString().trim() ?? '';
   }
+  final satirAcik = _despatchLineSatirAciklamasi(line);
+  final qty = line['DeliveredQuantity'];
+  num? miktar;
+  String? birim;
+  if (qty is num) {
+    miktar = qty;
+  } else if (qty is Map) {
+    final qm = Map<String, dynamic>.from(qty);
+    final t = _ublXmlScalarText(qm);
+    if (t != null) miktar = num.tryParse(t) ?? double.tryParse(t);
+    birim = (qm['@_unitCode'] ?? qm['@_UnitCode'])?.toString();
+  }
+  birim ??= line['unitCode']?.toString();
   return <String, dynamic>{
     if (ad.isNotEmpty) 'aciklama': ad,
-    if (line['DeliveredQuantity'] != null) 'miktar': line['DeliveredQuantity'],
+    if (satirAcik != null && satirAcik.isNotEmpty) 'satirAciklama': satirAcik,
+    if (miktar != null) 'miktar': miktar,
+    if (birim != null && birim.isNotEmpty) 'birim': birim,
   };
 }
 
@@ -821,20 +888,14 @@ List<Map<String, dynamic>> _irsaliyeKalemleri(Map<String, dynamic> data) {
         rows.add(_kalemDespatchBelgeOzet(Map<String, dynamic>.from(single)));
       }
     }
-    if (rows.isNotEmpty) return rows;
+    if (rows.isNotEmpty) {
+      _irsaliyeKalemlerineSatirAciklamasiEkle(rows, _irsaliyeUblDespatchLines(data));
+      return rows;
+    }
   }
 
-  final upRaw = data['ublParsed'];
-  if (upRaw is! Map) return [];
-  final up = Map<String, dynamic>.from(upRaw);
-  final daRaw = up['DespatchAdvice'];
-  if (daRaw is! Map) return [];
-  final da = Map<String, dynamic>.from(daRaw);
-  final linesRaw = da['DespatchLine'];
-  if (linesRaw == null) return [];
-  final lines = linesRaw is List
-      ? linesRaw.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
-      : [Map<String, dynamic>.from(linesRaw as Map)];
+  final lines = _irsaliyeUblDespatchLines(data);
+  if (lines.isEmpty) return [];
   final out = <Map<String, dynamic>>[];
   for (final line in lines) {
     final itemRaw = _ublFirst(line['Item']);
@@ -842,6 +903,7 @@ List<Map<String, dynamic>> _irsaliyeKalemleri(Map<String, dynamic> data) {
     if (itemRaw is Map) {
       name = _ublXmlScalarText(Map<String, dynamic>.from(itemRaw)['Name'])?.trim() ?? '';
     }
+    final satirAcik = _despatchLineSatirAciklamasi(line);
     final qty = line['DeliveredQuantity'];
     num? miktar;
     String? birim;
@@ -855,6 +917,7 @@ List<Map<String, dynamic>> _irsaliyeKalemleri(Map<String, dynamic> data) {
     }
     out.add(<String, dynamic>{
       if (name.isNotEmpty) 'aciklama': name,
+      if (satirAcik != null && satirAcik.isNotEmpty) 'satirAciklama': satirAcik,
       if (miktar != null) 'miktar': miktar,
       if (birim != null && birim.isNotEmpty) 'birim': birim,
     });
@@ -1991,6 +2054,12 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(_irsaliyeSatirBaslik(k, i)),
+                              if (k['satirAciklama'] != null &&
+                                  k['satirAciklama'].toString().trim().isNotEmpty)
+                                Text(
+                                  k['satirAciklama'].toString().trim(),
+                                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                                ),
                               if (k['miktar'] != null || k['birim'] != null)
                                 Text(
                                   'Miktar: ${_fmt(k['miktar'])}${k['birim'] != null ? ' ${k['birim']}' : ''}',

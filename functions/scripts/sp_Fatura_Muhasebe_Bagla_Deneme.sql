@@ -129,6 +129,46 @@ BEGIN
 
   SET @isAlisLike = CASE WHEN @FatTip IN (1, 8, 9, 11) THEN 1 ELSE 0 END;
 
+  DECLARE @KdvOranPct DECIMAL(28, 9) = CASE
+    WHEN @KdvOran <= 0 THEN 0
+    WHEN @KdvOran <= 1 THEN @KdvOran * 100.0
+    ELSE @KdvOran
+  END;
+
+  /* FATMUHGRP tevkifatsız KDV: FMGKDVORAN = %, FMGMUHKOD1 = alış / FMGMUHKOD2 = satış muh. kodu */
+  SELECT TOP 1 @AccKdv = NULLIF(LTRIM(RTRIM(
+    CASE WHEN @isAlisLike = 1 THEN FMGMUHKOD1 ELSE FMGMUHKOD2 END
+  )), '')
+  FROM dbo.FATMUHGRUP WITH (NOLOCK)
+  WHERE FMGGRUPKOD = 'FATMUHGRP'
+    AND ISNULL(FMGKDVORAN, 0) > 0
+    AND ISNULL(NULLIF(LTRIM(RTRIM(
+      CASE WHEN @isAlisLike = 1 THEN FMGMUHKOD1 ELSE FMGMUHKOD2 END
+    )), ''), '') <> ''
+  ORDER BY ABS(ISNULL(FMGKDVORAN, 0) - @KdvOranPct);
+
+  IF @AccKdv IS NULL
+  BEGIN
+    SELECT TOP 1 @AccKdv = NULLIF(LTRIM(RTRIM(
+      CASE WHEN @isAlisLike = 1 THEN FMGMUHKOD1 ELSE FMGMUHKOD2 END
+    )), '')
+    FROM dbo.FATMUHGRUP WITH (NOLOCK)
+    WHERE FMGGRUPKOD = 'FATMUHGRP' AND FMGISLEMNO = 55
+      AND ISNULL(NULLIF(LTRIM(RTRIM(
+        CASE WHEN @isAlisLike = 1 THEN FMGMUHKOD1 ELSE FMGMUHKOD2 END
+      )), ''), '') <> '';
+  END;
+
+  SET @AccKdvInd = @AccKdv;
+
+  SELECT TOP 1 @AccTev360 = NULLIF(LTRIM(RTRIM(FMGMUHKOD1)), '')
+  FROM dbo.FATMUHGRUP WITH (NOLOCK)
+  WHERE FMGGRUPKOD = 'FATMUHGRP' AND FMGISLEMNO = 56
+    AND ISNULL(NULLIF(LTRIM(RTRIM(FMGMUHKOD1)), ''), '') <> '';
+
+  IF @AccTev360 IS NULL
+    SET @AccTev360 = '360 01 02';
+
   /* --- Referans fatura (ALIM hariç): tevkifatlı ise hesap kodları korunur --- */
   IF @RefFatFisRefNo IS NOT NULL AND @RefFatFisRefNo > 0 AND @FatTip <> 1
   BEGIN
@@ -236,7 +276,7 @@ BEGIN
         SELECT TOP 1 @AccTev360 = acc FROM #ref WHERE role = 'TEV360';
 
         IF @AccKdvInd IS NULL
-          SET @AccKdvInd = '191 108 10';
+          SET @AccKdvInd = ISNULL(@AccKdv, '191 108 10');
         IF @AccTev360 IS NULL
           SET @AccTev360 = '360 01 02';
 
@@ -424,18 +464,14 @@ BEGIN
         OR (@isAlisLike = 0 AND FMGISLEMNO = 59)
       );
 
-  SELECT TOP 1 @AccKdv = NULLIF(LTRIM(RTRIM(FMGMUHKOD1)), '')
-  FROM dbo.FATMUHGRUP WITH (NOLOCK)
-  WHERE FMGGRUPKOD = 'FATMUHGRP' AND FMGISLEMNO = 55
-  ORDER BY ABS(ISNULL(FMGKDVORAN, 0) - ISNULL(@KdvOran, 0));
-
-  SET @AccKdvInd = '191 108 10';
-  SET @AccTev360 = '360 01 02';
-
   IF @AccMal IS NULL
     SET @AccMal = '153';
   IF @AccKdv IS NULL
     SET @AccKdv = '191';
+  IF @AccKdvInd IS NULL
+    SET @AccKdvInd = @AccKdv;
+  IF @AccKdvInd IS NULL
+    SET @AccKdvInd = '191 108 10';
 
   BEGIN TRAN;
 

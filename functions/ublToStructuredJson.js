@@ -96,16 +96,31 @@ function invoiceLineToOzet(line) {
   };
 }
 
+function lineNotesJoined(line) {
+  const n = line?.Note;
+  if (!n) return null;
+  const parts = [];
+  const push = (v) => {
+    const s = str(v);
+    if (s) parts.push(s);
+  };
+  if (Array.isArray(n)) n.forEach(push);
+  else push(n);
+  return parts.length ? parts.join(" | ") : null;
+}
+
 function despatchLineToOzet(line) {
   if (!line) return null;
   const qty = line.DeliveredQuantity;
   const item = line.Item;
   return {
     ID: val(line.ID),
+    Note: lineNotesJoined(line),
     DeliveredQuantity: val(qty) != null ? Number(val(qty)) : null,
     unitCode: line.DeliveredQuantity?.["@_unitCode"] || null,
     Item: item ? {
       Name: str(item.Name),
+      Description: itemDescriptionJoined(item),
       SellersItemIdentification: str(item.SellersItemIdentification?.ID),
     } : null,
   };

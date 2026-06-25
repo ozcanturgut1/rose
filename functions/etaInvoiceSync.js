@@ -1,7 +1,7 @@
 import sql from "mssql";
 import { getFirestore } from "firebase-admin/firestore";
 import { resolveSqlTargets } from "./sqlDbTargets.js";
-import { computeTevkifatKdvSplit, convertDocAmountToTlIfNeeded } from "./tevkifatMuhasebe.js";
+import { computeTevkifatKdvSplit, convertDocAmountToTlIfNeeded, roundMoney } from "./tevkifatMuhasebe.js";
 
 let readPoolPromise = null;
 let writePoolPromise = null;
@@ -576,22 +576,85 @@ function applyKalemKullaniciAciklamalari(lines, afterData) {
 }
 
 /**
- * Stok eşleştirmede birincil metin: kullanıcı kalem açıklaması → UBL stok cinsi → satır metni.
- * UBL `Item/Name` stok cinsidir; eşleştirmede kullanıcı notu önceliklidir.
+ * Stok eşleştirmede birincil metin: onay kalem açıklaması → satır metni → UBL Item/Name.
+ * Onay notu yokken Item/Name çoğu zaman gönderici ünvanıdır (kargo vb.); geçmiş eşleşmede öne alınmaz.
  */
 function primaryKalemAciklama(line) {
   const user = String(line?.kullaniciKalemAciklama || "").trim();
   if (user) return user;
-  const cinsi = String(line?.stokCinsi || "").trim();
-  if (cinsi) return cinsi;
   const la = String(line?.lineAciklama || "").trim();
   const desc = String(line?.description || "").trim();
   for (const t of [la, desc]) {
     if (t && !isCodeLikeText(t)) return t;
   }
+  const cinsi = String(line?.stokCinsi || "").trim();
+  if (cinsi) return cinsi;
   if (la) return la;
   if (desc) return desc;
   return String(line?.itemCode || "").trim();
+}
+
+function hasUserKalemAciklama(line) {
+  return Boolean(String(line?.kullaniciKalemAciklama || "").trim());
+}
+
+/** UBL LineExtensionAmount öncelikli kalem neti (miktar×birim fiyat ile örtüşmese de). */
+function lineNetFromUbl(line) {
+  const qty = parseNum(line?.qty, 1) || 1;
+  const unitPrice = parseNum(line?.unitPrice, 0);
+  const net = parseNum(line?.net, 0);
+  if (net > 0) return net;
+  return roundMoney(qty * unitPrice);
+}
+
+/** KDV: UBL TaxAmount bazen matrah ile aynı gelir; o durumda orandan hesapla. */
+function lineTaxFromUbl(line) {
+  const net = lineNetFromUbl(line);
+  const pct = parseNum(line?.taxPercent, 0);
+  const frac = pct > 0 && pct <= 1 ? pct : pct / 100;
+  const rawTax = parseNum(line?.taxAmount, 0);
+  const fromRate = frac > 0 && net > 0 ? roundMoney(net * frac) : 0;
+  if (fromRate <= 0) return rawTax;
+  if (rawTax <= 0) return fromRate;
+  if (net > 0 && Math.abs(rawTax - net) / net < 0.05) return fromRate;
+  if (net > 0 && rawTax >= net * 0.45 && frac > 0 && frac <= 0.3) return fromRate;
+  return rawTax;
+}
+
+/** SP satır neti = miktar × birim fiyat; UBL netine uyması için efektif birim fiyat. */
+function unitPriceForEtaLine(line, isForeignCurrency, kur) {
+  const qty = parseNum(line?.qty, 1) || 1;
+  const net = lineNetFromUbl(line);
+  const effective = qty > 0 ? net / qty : parseNum(line?.unitPrice, 0);
+  const n = roundMoney(effective);
+  return isForeignCurrency && kur > 0 ? roundMoney(n * kur) : n;
+}
+
+function pickDominantSupplierHistoryMatch(rows, stkFreq) {
+  if (!rows?.length || !stkFreq?.size) return null;
+  let topStk = null;
+  let topCnt = 0;
+  for (const [k, v] of stkFreq) {
+    if (v > topCnt) {
+      topCnt = v;
+      topStk = k;
+    }
+  }
+  if (!topStk) return null;
+  const row = rows.find((r) => String(r.STKKOD || "").trim() === topStk);
+  if (!row) return null;
+  return {
+    total: 0,
+    baseScore: 0,
+    descScore: 0,
+    cinsiScore: 0,
+    codeScore: 0,
+    weakDesc: false,
+    stkkod: topStk,
+    stkcinsi: String(row.STKCINSI || "").trim(),
+    row,
+    dominantFallback: true,
+  };
 }
 
 /** Anlamlı kalem açıklaması varken UBL Name koduna doğrudan düşülmesin. */
@@ -907,6 +970,68 @@ async function patchCurrencyFields(wPool, fatFisRefNo, opts) {
         WHERE FATHARREFNO = @ref AND FATHARSIRANO = @sira
       `);
   }
+}
+
+/** Dövizli fatura: FATFIS döviz alanlarını bağlı CARFIS / CARHAR satırına yansıtır (üretim ETA şablonu). */
+async function patchCariCurrencyFromFatFis(wPool, fatFisRefNo) {
+  const rs = await wPool
+    .request()
+    .input("ref", sql.Int, fatFisRefNo)
+    .query(`
+      SELECT
+        FATFISCARREFNO,
+        FATFISDOVKOD,
+        FATFISDOVTUR,
+        FATFISDOVKUR,
+        FATFISGENDOVTOP,
+        FATFISDOVTAR
+      FROM dbo.FATFIS WITH (NOLOCK)
+      WHERE FATFISREFNO = @ref
+    `);
+  const row = rs.recordset[0];
+  if (!row) return;
+
+  const carRef = Number(row.FATFISCARREFNO) || 0;
+  const kod = String(row.FATFISDOVKOD || "").trim().toUpperCase();
+  const kur = parseNum(row.FATFISDOVKUR, 0);
+  if (!carRef || !kod || isDomesticTryOrTl(kod) || kur <= 0) return;
+
+  const dovTop = parseNum(row.FATFISGENDOVTOP, 0);
+  if (dovTop <= 0) return;
+
+  const tur = String(row.FATFISDOVTUR || "MBNKSAT").trim().toUpperCase().slice(0, 20);
+  const dovTar = row.FATFISDOVTAR instanceof Date ? row.FATFISDOVTAR : new Date();
+
+  await wPool
+    .request()
+    .input("carRef", sql.Int, carRef)
+    .input("kod", sql.NVarChar(10), kod.slice(0, 10))
+    .input("tur", sql.NVarChar(20), tur)
+    .input("kur", sql.Decimal(18, 8), kur)
+    .input("dovTop", sql.Decimal(18, 4), dovTop)
+    .input("dovTar", sql.DateTime, dovTar)
+    .query(`
+      UPDATE dbo.CARHAR
+      SET
+        CARHARDOVKOD = @kod,
+        CARHARDOVTUR = @tur,
+        CARHARDOVTUTAR = @dovTop,
+        CARHARDOVKUR = @kur
+      WHERE CARHARREFNO = @carRef;
+
+      UPDATE dbo.CARFIS
+      SET
+        CARFISDOVTAR = @dovTar,
+        CARFISDOVALACAKTOP = CASE
+          WHEN ISNULL(CARFISALACAKTOP, 0) >= ISNULL(CARFISBORCTOP, 0) THEN @dovTop
+          ELSE CARFISDOVALACAKTOP
+        END,
+        CARFISDOVBORCTOP = CASE
+          WHEN ISNULL(CARFISBORCTOP, 0) > ISNULL(CARFISALACAKTOP, 0) THEN @dovTop
+          ELSE CARFISDOVBORCTOP
+        END
+      WHERE CARFISREFNO = @carRef;
+    `);
 }
 
 async function loadDefaults(rPool, wPool) {
@@ -1229,7 +1354,16 @@ async function findStockCodeBySupplierHistory(rPool, opts) {
 
   const minScore = parseNum(process.env.ETA_MATCH_MIN_SCORE, 0.28);
   const primary = primaryKalemAciklama(line);
-  if (!isCodeLikeText(primary) && best.total < minScore) return null;
+  const hasUserNote = hasUserKalemAciklama(line);
+
+  // Onay kalem açıklaması boşsa düşük metin skoru ile geçmiş eşleşmeyi eleme;
+  // tedarikçinin baskın stok koduna düş (ör. kargo → NAKLİYE GİDERİ).
+  if (!hasUserNote && best.total < minScore) {
+    const dom = pickDominantSupplierHistoryMatch(rows, stkFreq);
+    if (dom) best = dom;
+  }
+
+  if (hasUserNote && !isCodeLikeText(primary) && best.total < minScore) return null;
 
   return {
     stkkod: best.stkkod,
@@ -1250,6 +1384,7 @@ async function findStockCodeBySupplierHistory(rPool, opts) {
     cinsiScore: Number(best.cinsiScore.toFixed(4)),
     codeScore: Number(best.codeScore.toFixed(4)),
     weakDesc: Boolean(best.weakDesc),
+    dominantFallback: Boolean(best.dominantFallback),
     fromDescription: String(best.row?.ACIKLAMA || ""),
   };
 }
@@ -1410,6 +1545,9 @@ export async function previewStockLineMatches(afterData) {
     });
     itemCodeResolved = histResolved.itemCodeResolved;
     matchSource = histResolved.matchSource;
+    if (historyMatch?.dominantFallback && matchSource) {
+      matchSource = "supplier_history_dominant";
+    }
     stokFamilyRemapFrom = histResolved.stokFamilyRemapFrom;
 
     if (!itemCodeResolved) {
@@ -1476,6 +1614,7 @@ export async function previewStockLineMatches(afterData) {
             cinsiScore: historyMatch.cinsiScore || null,
             codeScore: historyMatch.codeScore || null,
             weakDesc: historyMatch.weakDesc || false,
+            dominantFallback: historyMatch.dominantFallback || false,
           }
         : null,
       linePreview: {
@@ -1560,9 +1699,11 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   const dovizKuru = parseExchangeRate(q.dovizKuru ?? ublDovizKuru, 1);
   const isForeignCurrency = !isDomesticTryOrTl(paraBirimiRaw);
   const effectiveDovizKuru = isForeignCurrency && dovizKuru > 0 ? dovizKuru : 1;
-  const docMalHizmetToplamTutari = usableLines.reduce((s, x) => s + (x.net || 0), 0);
+  const docMalHizmetToplamTutari = usableLines.reduce((s, x) => s + lineNetFromUbl(x), 0);
   const toplamIskonto = 0;
-  const docVergiTutari = usableLines.reduce((s, x) => s + (x.taxAmount || 0), 0);
+  const docVergiFromQnb = parseNum(q.kdvToplamTutari ?? afterData?.kdvToplamTutari, 0);
+  const docVergiFromLines = usableLines.reduce((s, x) => s + lineTaxFromUbl(x), 0);
+  const docVergiTutari = docVergiFromQnb > 0 ? docVergiFromQnb : docVergiFromLines;
   const docOdenecekTutar = parseNum(q.odenecekTutar, docMalHizmetToplamTutari + docVergiTutari);
   const malHizmetToplamTutari = docMalHizmetToplamTutari * effectiveDovizKuru;
   const vergiTutari = docVergiTutari * effectiveDovizKuru;
@@ -1733,6 +1874,9 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     });
     itemCodeResolved = histResolved.itemCodeResolved;
     matchSource = histResolved.matchSource;
+    if (historyMatch?.dominantFallback && matchSource) {
+      matchSource = "supplier_history_dominant";
+    }
     stokFamilyRemapFrom = histResolved.stokFamilyRemapFrom;
 
     if (!itemCodeResolved) {
@@ -1796,23 +1940,24 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
             cinsiScore: historyMatch.cinsiScore || null,
             codeScore: historyMatch.codeScore || null,
             weakDesc: historyMatch.weakDesc || false,
+            dominantFallback: historyMatch.dominantFallback || false,
           }
         : null,
     });
     const qty = parseNum(l.qty, 1) || 1;
-    const unitPrice = parseNum(l.unitPrice, 0);
+    const lineNet = lineNetFromUbl(l);
     const taxPercent = parseNum(l.taxPercent, 0);
-    const taxAmount = parseNum(l.taxAmount, 0);
-    const unitPriceForSp = isForeignCurrency ? unitPrice * effectiveDovizKuru : unitPrice;
-    const taxAmountForSp = isForeignCurrency ? taxAmount * effectiveDovizKuru : taxAmount;
+    const lineTax = lineTaxFromUbl(l);
+    const unitPriceForSp = unitPriceForEtaLine(l, isForeignCurrency, effectiveDovizKuru);
+    const taxAmountForSp = isForeignCurrency ? roundMoney(lineTax * effectiveDovizKuru) : lineTax;
     const lineAcik = String(l.lineAciklama || "").trim();
     const satirAcikSrc = String(lineAcik || l.stokCinsi || l.itemCode || "HIZMET").trim();
     const satirNotu = satirAcikSrc.slice(0, 50);
     const satirAcik = satirAcikSrc.slice(0, 255);
     lineCurrency.push({
       sira: i + 1,
-      dovFiyat: unitPrice,
-      dovTutar: parseNum(l.net, qty * unitPrice),
+      dovFiyat: qty > 0 ? roundMoney(lineNet / qty) : parseNum(l.unitPrice, 0),
+      dovTutar: lineNet,
     });
 
     const dr = wPool.request();
@@ -1895,6 +2040,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
         WHERE FATFISREFNO = @ref
       `);
   }
+  await patchCariCurrencyFromFatFis(wPool, fatFisRefNo);
   // ALIM (FATFISTIPI=1): muhasebe her zaman kalem bazlı; referans SP'ye gönderilmez.
   const muhasebeRefForSp =
     Number(erpFaturaTipiNo) === 1 ? 0 : refFatFisForMuhasebe;

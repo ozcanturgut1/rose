@@ -50,7 +50,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
   String? error;
   List<Map<String, dynamic>> items = [];
   /// İşaretliyse liste satırına tıklanınca [InvoiceJsonReviewScreen] (özet), aksi halde PDF önizleme.
-  bool _listTapShowsJson = false;
+  bool _listTapShowsJson = true;
   /// Admin'de, yalnızca seçilen faturaları Firestore'a backfill etmek için `belgeNo` kümesi.
   final Set<String> _selectedBelgeNosForBackfill = <String>{};
   /// Admin listesinde sayfa indeksi (0 tabanlı); yalnızca görünüm — API tek seferde yüklenir.

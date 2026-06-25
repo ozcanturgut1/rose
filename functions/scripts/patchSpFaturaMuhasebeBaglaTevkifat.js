@@ -1,6 +1,9 @@
 /**
  * dbo.sp_Fatura_Muhasebe_Bagla_Deneme — tevkifatlı fatura muhasebe kaydı.
  *
+ * KDV hesap kodu: FATMUHGRP içinde FMGKDVORAN > 0 satırlarından (ör. %10 → 191 108 10).
+ * Eski FMGISLEMNO=55 (oransız 191) yalnızca yedek.
+ *
  * Tevkifatlı alışta:
  *   - Toplam KDV = FATFISKDVTUTARI (mal × KDV oranı)
  *   - Sorumlu sıfat KDV = tevkifat tutarı → 360 hesabı (alacak)
@@ -27,14 +30,35 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SQL_FILE = path.join(__dirname, "sp_Fatura_Muhasebe_Bagla_Deneme.sql");
 
 function parseArgs(argv) {
-  const out = { apply: false, confirmWriteDb: null };
+  const out = { apply: false, confirmWriteDb: null, syncFatmuhgrpOnly: false };
   for (const a of argv.slice(2)) {
     if (a === "--apply") out.apply = true;
+    else if (a === "--sync-fatmuhgrp-only") out.syncFatmuhgrpOnly = true;
     else if (a.startsWith("--confirm-write-db=")) {
       out.confirmWriteDb = a.slice("--confirm-write-db=".length).trim();
     }
   }
   return out;
+}
+
+async function syncFatmuhgrpKdvRows(pool, readDb) {
+  const safeDb = readDb.replace(/]/g, "]]");
+  const syncRs = await pool.request().query(`
+    UPDATE w
+    SET
+      w.FMGMUHKOD1 = r.FMGMUHKOD1 COLLATE DATABASE_DEFAULT,
+      w.FMGMUHKOD2 = r.FMGMUHKOD2 COLLATE DATABASE_DEFAULT,
+      w.FMGMUHKOD3 = r.FMGMUHKOD3 COLLATE DATABASE_DEFAULT,
+      w.FMGKDVORAN = r.FMGKDVORAN
+    FROM dbo.FATMUHGRUP AS w
+    INNER JOIN [${safeDb}].dbo.FATMUHGRUP AS r
+      ON r.FMGGRUPKOD COLLATE DATABASE_DEFAULT = w.FMGGRUPKOD
+     AND r.FMGISLEMNO = w.FMGISLEMNO
+    WHERE w.FMGGRUPKOD = N'FATMUHGRP' COLLATE DATABASE_DEFAULT
+      AND ISNULL(r.FMGKDVORAN, 0) > 0;
+    SELECT @@ROWCOUNT AS updatedRows;
+  `);
+  return Number(syncRs.recordset[0]?.updatedRows ?? 0);
 }
 
 function sqlConfig(database) {
@@ -90,14 +114,24 @@ async function main() {
       console.log(
         `  node scripts/patchSpFaturaMuhasebeBaglaTevkifat.js --apply --confirm-write-db=${t.writeDb}`
       );
+      console.log(
+        `  (yalnızca FATMUHGRUP senkron) --apply --sync-fatmuhgrp-only --confirm-write-db=${t.writeDb}`
+      );
       return;
     }
 
-    await pool
-      .request()
-      .query(`IF OBJECT_ID('dbo.${PROC}','P') IS NOT NULL DROP PROCEDURE dbo.${PROC};`);
-    await pool.request().batch(body);
-    console.log("[OK] Prosedür güncellendi.");
+    if (!args.syncFatmuhgrpOnly) {
+      await pool
+        .request()
+        .query(`IF OBJECT_ID('dbo.${PROC}','P') IS NOT NULL DROP PROCEDURE dbo.${PROC};`);
+      await pool.request().batch(body);
+      console.log("[OK] Prosedür güncellendi.");
+    } else {
+      console.log("(--sync-fatmuhgrp-only: prosedür adımı atlandı)");
+    }
+
+    const updated = await syncFatmuhgrpKdvRows(pool, t.readDb);
+    console.log(`[OK] FATMUHGRUP KDV oran satırları senkron (${updated} güncellendi).`);
   } finally {
     await pool.close();
   }
