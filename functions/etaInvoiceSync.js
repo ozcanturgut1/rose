@@ -1,7 +1,16 @@
 import sql from "mssql";
 import { getFirestore } from "firebase-admin/firestore";
 import { resolveSqlTargets } from "./sqlDbTargets.js";
-import { computeTevkifatKdvSplit, convertDocAmountToTlIfNeeded, roundMoney } from "./tevkifatMuhasebe.js";
+import {
+  alignTevkifatSplitToPayable,
+  computeTevkifatKdvSplit,
+  convertDocAmountToTlIfNeeded,
+  roundMoney,
+} from "./tevkifatMuhasebe.js";
+import {
+  computeUblAuthoritativeAmounts,
+  resolveAmountModel,
+} from "./ublAuthoritativeAmounts.js";
 
 let readPoolPromise = null;
 let writePoolPromise = null;
@@ -630,6 +639,133 @@ function unitPriceForEtaLine(line, isForeignCurrency, kur) {
   return isForeignCurrency && kur > 0 ? roundMoney(n * kur) : n;
 }
 
+/** sp_Fatura_Detay_Kayit ile aynı: miktar × yuvarlanmış birim fiyat (TL). */
+function etaLineNetTl(line, isForeignCurrency, kur) {
+  const qty = parseNum(line?.qty, 1) || 1;
+  const unitPrice = unitPriceForEtaLine(line, isForeignCurrency, kur);
+  return roundMoney(qty * unitPrice);
+}
+
+/** Kalem KDV tutarı (TL); dövizlide satır vergisi × kur. */
+function etaLineTaxTl(line, isForeignCurrency, kur) {
+  const lineTax = lineTaxFromUbl(line);
+  return isForeignCurrency && kur > 0 ? roundMoney(lineTax * kur) : lineTax;
+}
+
+/**
+ * Başlık tutarlarını kalem bazlı (SP ile örtüşen) yuvarlama ile hesaplar.
+ * Toplam = Σ kalem; başlıkta ayrıca roundMoney uygulanmaz.
+ */
+function computeAlignedInvoiceAmounts(usableLines, isForeignCurrency, effectiveDovizKuru) {
+  const perLine = [];
+  let malHizmetToplamTutari = 0;
+  let vergiTutari = 0;
+  for (const line of usableLines) {
+    const qty = parseNum(line?.qty, 1) || 1;
+    const unitPrice = unitPriceForEtaLine(line, isForeignCurrency, effectiveDovizKuru);
+    const netTl = roundMoney(qty * unitPrice);
+    const taxTl = etaLineTaxTl(line, isForeignCurrency, effectiveDovizKuru);
+    perLine.push({ line, qty, unitPrice, netTl, taxTl });
+    malHizmetToplamTutari += netTl;
+    vergiTutari += taxTl;
+  }
+  return {
+    perLine,
+    malHizmetToplamTutari,
+    vergiTutari,
+    odenecekTutar: malHizmetToplamTutari + vergiTutari,
+  };
+}
+
+/** Kalemler yazıldıktan sonra FATFIS / cari / stok başlığını hizalar (Model A: UBL başlık; Model B: FATHAR). */
+async function syncFatFisHeaderFromFathar(wPool, fatFisRefNo, opts = {}) {
+  const ref = Number(fatFisRefNo);
+  if (!Number.isFinite(ref) || ref <= 0) return null;
+
+  const rs = await wPool.request().input("ref", sql.Int, ref).query(`
+    SELECT
+      F.FATFISCARREFNO,
+      F.FATFISSTKREFNO,
+      ISNULL(SUM(ISNULL(H.FATHARNETTUTAR, ISNULL(H.FATHARKDVMATRAH, H.FATHARTUTAR))), 0) AS mal,
+      ISNULL(SUM(ISNULL(H.FATHARKDVTUTAR, 0)), 0) AS kdv
+    FROM dbo.FATFIS F WITH (NOLOCK)
+    LEFT JOIN dbo.FATHAR H WITH (NOLOCK) ON H.FATHARREFNO = F.FATFISREFNO
+    WHERE F.FATFISREFNO = @ref
+    GROUP BY F.FATFISCARREFNO, F.FATFISSTKREFNO
+  `);
+  const row = rs.recordset[0];
+  if (!row) return null;
+
+  const useUblHeader = Boolean(opts.useUblHeader);
+  const malFromHar = Number(row.mal) || 0;
+  const kdvFromHar = Number(row.kdv) || 0;
+  const malOpt = Number(opts.malTop);
+  const kdvOpt = Number(opts.kdvTop);
+  const mal =
+    useUblHeader && Number.isFinite(malOpt) && malOpt >= 0 ? malOpt : malFromHar;
+  const kdv =
+    useUblHeader && Number.isFinite(kdvOpt) && kdvOpt >= 0 ? kdvOpt : kdvFromHar;
+  let gen = Number(opts.odenecekTutar);
+  if (!Number.isFinite(gen) || gen <= 0) {
+    gen = mal + kdv;
+  }
+  const tev = Number(opts.tevkifatTutar);
+  const hasTev = Number.isFinite(tev) && tev > 0;
+
+  const req = wPool.request();
+  req.input("ref", sql.Int, ref);
+  req.input("mal", sql.Decimal(18, 4), mal);
+  req.input("kdv", sql.Decimal(18, 4), kdv);
+  req.input("gen", sql.Decimal(18, 4), gen);
+  req.input("tev", sql.Decimal(18, 4), hasTev ? tev : 0);
+  req.input("tevFlag", sql.Bit, hasTev ? 1 : 0);
+  await req.query(`
+    UPDATE dbo.FATFIS
+    SET
+      FATFISMALTOP = @mal,
+      FATFISKDVMATRAHI = @mal,
+      FATFISBRUTTOPLAM = @mal,
+      FATFISKDVTUTARI = @kdv,
+      FATFISARATOPLAM = @gen,
+      FATFISGENTOPLAM = @gen,
+      FATFISTEVTUTAR = CASE WHEN @tevFlag = 1 THEN @tev ELSE FATFISTEVTUTAR END,
+      FATFISTEVKIFATFLAG = CASE WHEN @tevFlag = 1 THEN 1 ELSE FATFISTEVKIFATFLAG END
+    WHERE FATFISREFNO = @ref
+  `);
+
+  const carRef = Number(row.FATFISCARREFNO) || 0;
+  if (carRef > 0) {
+    await wPool
+      .request()
+      .input("carRef", sql.Int, carRef)
+      .input("gen", sql.Decimal(18, 4), gen)
+      .input("kdv", sql.Decimal(18, 4), kdv)
+      .query(`
+        UPDATE dbo.CARFIS SET CARFISALACAKTOP = @gen WHERE CARFISREFNO = @carRef;
+        UPDATE dbo.CARHAR
+        SET CARHARTUTAR = @gen, CARHARKDVTUTAR = @kdv, CARHARKALAN = @gen
+        WHERE CARHARREFNO = @carRef
+      `);
+  }
+
+  const stkRef = Number(row.FATFISSTKREFNO) || 0;
+  if (stkRef > 0) {
+    await wPool
+      .request()
+      .input("stkRef", sql.Int, stkRef)
+      .input("mal", sql.Decimal(18, 4), mal)
+      .input("kdv", sql.Decimal(18, 4), kdv)
+      .input("gen", sql.Decimal(18, 4), gen)
+      .query(`
+        UPDATE dbo.STKFIS
+        SET STKFISTOPNTUT = @mal, STKFISTOPKDV = @kdv, STKFISTOPKTUT = @gen
+        WHERE STKFISREFNO = @stkRef
+      `);
+  }
+
+  return { mal, kdv, gen };
+}
+
 function pickDominantSupplierHistoryMatch(rows, stkFreq) {
   if (!rows?.length || !stkFreq?.size) return null;
   let topStk = null;
@@ -793,6 +929,48 @@ function joinDespatchBelgeNos(despatches) {
     .map((d) => String(d?.belgeNo || "").trim())
     .filter(Boolean)
     .join(",");
+}
+
+function extractLegalMonetaryFromUbl(data) {
+  const inv = getInvoiceNodeFromUbl(data);
+  if (!inv) return null;
+  const lmt = inv.LegalMonetaryTotal || {};
+  return {
+    lineExtension: parseNum(textNode(firstOf(lmt.LineExtensionAmount)), 0),
+    taxExclusive: parseNum(textNode(firstOf(lmt.TaxExclusiveAmount)), 0),
+    taxInclusive: parseNum(textNode(firstOf(lmt.TaxInclusiveAmount)), 0),
+    payable: parseNum(textNode(firstOf(lmt.PayableAmount)), 0),
+  };
+}
+
+/** Fatura düzeyi TaxTotal (belge dövizi); OTV alt kalemleri ayrı işlenir. */
+function extractDocTaxTotalFromUbl(data) {
+  const inv = getInvoiceNodeFromUbl(data);
+  if (!inv) return 0;
+  const tt = firstOf(inv.TaxTotal);
+  if (!tt) return 0;
+  return parseNum(textNode(firstOf(tt.TaxAmount)), 0);
+}
+
+/**
+ * Model A: belge dövizinde matrah / KDV / ödenecek (öncelik qnbRaw → UBL → kalem toplamı).
+ */
+function buildDocTotalsForAmountModel(afterData, q, usableLines) {
+  const lmt = extractLegalMonetaryFromUbl(afterData);
+  const lineMalSum = usableLines.reduce((s, x) => s + lineNetFromUbl(x), 0);
+  const lineTaxSum = usableLines.reduce((s, x) => s + lineTaxFromUbl(x), 0);
+  const qnbMal = parseNum(q.malHizmetToplamTutari ?? afterData?.malHizmetToplamTutari, 0);
+  const qnbKdv = parseNum(q.kdvToplamTutari ?? afterData?.kdvToplamTutari, 0);
+  const qnbPay = parseNum(q.odenecekTutar, 0);
+  const ublTax = extractDocTaxTotalFromUbl(afterData);
+
+  const mal =
+    qnbMal > 0 ? qnbMal : lmt?.lineExtension > 0 ? lmt.lineExtension : lineMalSum;
+  const kdv = qnbKdv > 0 ? qnbKdv : ublTax > 0 ? ublTax : lineTaxSum;
+  const payable =
+    qnbPay > 0 ? qnbPay : lmt?.payable > 0 ? lmt.payable : mal + kdv > 0 ? mal + kdv : 0;
+
+  return { mal, kdv, payable };
 }
 
 function extractExchangeRateFromUbl(data) {
@@ -1699,27 +1877,63 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   const dovizKuru = parseExchangeRate(q.dovizKuru ?? ublDovizKuru, 1);
   const isForeignCurrency = !isDomesticTryOrTl(paraBirimiRaw);
   const effectiveDovizKuru = isForeignCurrency && dovizKuru > 0 ? dovizKuru : 1;
-  const docMalHizmetToplamTutari = usableLines.reduce((s, x) => s + lineNetFromUbl(x), 0);
+  const amountModel = resolveAmountModel();
   const toplamIskonto = 0;
-  const docVergiFromQnb = parseNum(q.kdvToplamTutari ?? afterData?.kdvToplamTutari, 0);
-  const docVergiFromLines = usableLines.reduce((s, x) => s + lineTaxFromUbl(x), 0);
-  const docVergiTutari = docVergiFromQnb > 0 ? docVergiFromQnb : docVergiFromLines;
-  const docOdenecekTutar = parseNum(q.odenecekTutar, docMalHizmetToplamTutari + docVergiTutari);
-  const malHizmetToplamTutari = docMalHizmetToplamTutari * effectiveDovizKuru;
-  const vergiTutari = docVergiTutari * effectiveDovizKuru;
-  const odenecekTutar = docOdenecekTutar * effectiveDovizKuru;
+
+  let aligned;
+  let docOdenecekTutar;
+  let docTotals = null;
+
+  if (amountModel === "ubl") {
+    docTotals = buildDocTotalsForAmountModel(afterData, q, usableLines);
+    aligned = computeUblAuthoritativeAmounts({
+      usableLines,
+      docTotals,
+      isForeignCurrency,
+      kur: effectiveDovizKuru,
+      lineNetFromUbl,
+      lineTaxFromUbl,
+      parseQty: (line) => parseNum(line?.qty, 1) || 1,
+    });
+    docOdenecekTutar = aligned.docPayable;
+  } else {
+    aligned = computeAlignedInvoiceAmounts(usableLines, isForeignCurrency, effectiveDovizKuru);
+    const docVergiFromQnb = parseNum(q.kdvToplamTutari ?? afterData?.kdvToplamTutari, 0);
+    const docVergiFromLines = usableLines.reduce((s, x) => s + lineTaxFromUbl(x), 0);
+    const docVergiTutari = docVergiFromQnb > 0 ? docVergiFromQnb : docVergiFromLines;
+    docOdenecekTutar = parseNum(
+      q.odenecekTutar,
+      usableLines.reduce((s, x) => s + lineNetFromUbl(x), 0) + docVergiTutari
+    );
+  }
+
+  const malHizmetToplamTutari = aligned.malHizmetToplamTutari;
+  const vergiTutari = aligned.vergiTutari;
+  const odenecekTutar = aligned.odenecekTutar;
   const ublWithholding = extractWithholdingFromUbl(afterData);
   const tevkifatOrani = parseNum(q.tevkifatOrani ?? afterData?.tevkifatOrani ?? ublWithholding.tevkifatOrani, 0);
   const tevkifatKodu = String(q.tevkifatKodu || afterData?.tevkifatKodu || ublWithholding.tevkifatKodu || "").trim();
   let kdvSplit = null;
   let tevkifatTutar = 0;
   if (cls?.hasTevkifat) {
+    const payableTl =
+      docOdenecekTutar > 0
+        ? isForeignCurrency
+          ? roundMoney(docOdenecekTutar * effectiveDovizKuru)
+          : roundMoney(docOdenecekTutar)
+        : 0;
     kdvSplit = computeTevkifatKdvSplit({
       malHizmetToplam: malHizmetToplamTutari,
       kdvOrani: usableLines[0]?.taxPercent ?? 0,
       tevkifatOrani,
     });
-    tevkifatTutar = kdvSplit.tevkifatTutar;
+    if (vergiTutari > 0) {
+      kdvSplit = { ...kdvSplit, toplamKdv: vergiTutari };
+    }
+    if (payableTl > 0) {
+      kdvSplit = alignTevkifatSplitToPayable(kdvSplit, payableTl);
+    }
+    tevkifatTutar = kdvSplit?.tevkifatTutar ?? 0;
   }
   const vergiTutariKayit = kdvSplit ? kdvSplit.toplamKdv : vergiTutari;
   const odenecekTutarKayit = kdvSplit ? kdvSplit.odenecekTutar : odenecekTutar;
@@ -1844,6 +2058,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
 
   for (let i = 0; i < usableLines.length; i++) {
     const l = usableLines[i];
+    const alignedLine = aligned.perLine[i];
     const rawItemCode = String(l.itemCode || "").trim().slice(0, 40);
     let itemCodeResolved = null;
     let matchSource = null;
@@ -1944,20 +2159,20 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
           }
         : null,
     });
-    const qty = parseNum(l.qty, 1) || 1;
-    const lineNet = lineNetFromUbl(l);
+    const qty = alignedLine?.qty ?? (parseNum(l.qty, 1) || 1);
     const taxPercent = parseNum(l.taxPercent, 0);
-    const lineTax = lineTaxFromUbl(l);
-    const unitPriceForSp = unitPriceForEtaLine(l, isForeignCurrency, effectiveDovizKuru);
-    const taxAmountForSp = isForeignCurrency ? roundMoney(lineTax * effectiveDovizKuru) : lineTax;
+    const lineTax = alignedLine?.taxTl ?? etaLineTaxTl(l, isForeignCurrency, effectiveDovizKuru);
+    const unitPriceForSp = alignedLine?.unitPrice ?? unitPriceForEtaLine(l, isForeignCurrency, effectiveDovizKuru);
+    const taxAmountForSp = lineTax;
     const lineAcik = String(l.lineAciklama || "").trim();
     const satirAcikSrc = String(lineAcik || l.stokCinsi || l.itemCode || "HIZMET").trim();
     const satirNotu = satirAcikSrc.slice(0, 50);
     const satirAcik = satirAcikSrc.slice(0, 255);
+    const docLineNet = lineNetFromUbl(l);
     lineCurrency.push({
       sira: i + 1,
-      dovFiyat: qty > 0 ? roundMoney(lineNet / qty) : parseNum(l.unitPrice, 0),
-      dovTutar: lineNet,
+      dovFiyat: qty > 0 ? roundMoney(docLineNet / qty) : parseNum(l.unitPrice, 0),
+      dovTutar: docLineNet,
     });
 
     const dr = wPool.request();
@@ -2023,23 +2238,15 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   });
 
   await wPool.request().input("FatFisRefNo", sql.Int, fatFisRefNo).execute("dbo.sp_FatFisToplam_Kayit");
-  if (kdvSplit) {
-    await wPool
-      .request()
-      .input("ref", sql.Int, fatFisRefNo)
-      .input("tev", sql.Decimal(18, 4), kdvSplit.tevkifatTutar)
-      .input("kdv", sql.Decimal(18, 4), kdvSplit.toplamKdv)
-      .input("gen", sql.Decimal(18, 4), kdvSplit.odenecekTutar)
-      .query(`
-        UPDATE dbo.FATFIS
-        SET
-          FATFISTEVTUTAR = @tev,
-          FATFISKDVTUTARI = @kdv,
-          FATFISGENTOPLAM = @gen,
-          FATFISTEVKIFATFLAG = 1
-        WHERE FATFISREFNO = @ref
-      `);
-  }
+
+  await syncFatFisHeaderFromFathar(wPool, fatFisRefNo, {
+    useUblHeader: amountModel === "ubl",
+    malTop: malHizmetToplamTutari,
+    kdvTop: vergiTutariKayit,
+    odenecekTutar: odenecekTutarKayit,
+    tevkifatTutar: kdvSplit?.tevkifatTutar,
+  });
+
   await patchCariCurrencyFromFatFis(wPool, fatFisRefNo);
   // ALIM (FATFISTIPI=1): muhasebe her zaman kalem bazlı; referans SP'ye gönderilmez.
   const muhasebeRefForSp =

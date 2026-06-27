@@ -61,6 +61,17 @@ BEGIN
   IF @FatTip IS NULL
     THROW 50001, 'FATFIS bulunamadi.', 1;
 
+  DECLARE @HarMal DECIMAL(28, 9) = (
+    SELECT ISNULL(SUM(ROUND(ISNULL(H.FATHARNETTUTAR, ISNULL(H.FATHARKDVMATRAH, H.FATHARTUTAR)), 2)), 0)
+    FROM dbo.FATHAR H WITH (NOLOCK)
+    WHERE H.FATHARREFNO = @FatFisRefNo
+  );
+  DECLARE @HarKdv DECIMAL(28, 9) = (
+    SELECT ISNULL(SUM(ISNULL(H.FATHARKDVTUTAR, 0)), 0)
+    FROM dbo.FATHAR H WITH (NOLOCK)
+    WHERE H.FATHARREFNO = @FatFisRefNo
+  );
+
   IF @CurrentMuhRef > 0
   BEGIN
     SET @MuhFisRefNo = @CurrentMuhRef;
@@ -98,7 +109,7 @@ BEGIN
     ELSE 0
   END;
 
-  /* Matrahtan KDV; KDV × tevkifat oranı = 360 (sorumlu); kalan = 191 (indirilecek) */
+  /* Matrahtan KDV; tevkifatlıda FATFISGENTOPLAM (UBL ödenecek) otorite, bileşenler FATHAR'dan */
   IF @hasTevkifat = 1
   BEGIN
     DECLARE @KdvFrac DECIMAL(28, 9) = CASE
@@ -112,19 +123,53 @@ BEGIN
       ELSE @TevOran / 100.0
     END;
 
-    IF @MalTop > 0 AND @KdvFrac > 0
-      SET @KdvTop = ROUND(@MalTop * @KdvFrac, 2);
+    IF @HarMal > 0
+      SET @MalTop = @HarMal;
 
-    IF @KdvTop > 0 AND @TevFrac > 0
-      SET @TevTutar = ROUND(@KdvTop * @TevFrac, 2);
+    IF @HarKdv > 0
+      SET @KdvTop = @HarKdv;
+
+    IF @GenTop > 0 AND @MalTop > 0
+    BEGIN
+      SET @KdvIndirilecek = ROUND(@GenTop - @MalTop, 2);
+      IF @KdvIndirilecek < 0
+        SET @KdvIndirilecek = 0;
+      IF @KdvTop > 0
+        SET @TevTutar = ROUND(@KdvTop - @KdvIndirilecek, 2);
+      ELSE IF @KdvFrac > 0
+      BEGIN
+        SET @KdvTop = ROUND(@MalTop * @KdvFrac, 2);
+        SET @TevTutar = ROUND(@KdvTop - @KdvIndirilecek, 2);
+      END
+      ELSE
+        SET @TevTutar = 0;
+      IF @TevTutar < 0
+        SET @TevTutar = 0;
+    END
     ELSE
-      SET @TevTutar = 0;
+    BEGIN
+      IF @MalTop > 0 AND @KdvFrac > 0
+        SET @KdvTop = ROUND(@MalTop * @KdvFrac, 2);
 
-    SET @KdvIndirilecek = ROUND(@KdvTop - @TevTutar, 2);
-    IF @KdvIndirilecek < 0
-      SET @KdvIndirilecek = 0;
+      IF @KdvTop > 0 AND @TevFrac > 0
+        SET @TevTutar = ROUND(@KdvTop * @TevFrac, 2);
+      ELSE
+        SET @TevTutar = 0;
 
-    SET @GenTop = ROUND(@MalTop + @KdvIndirilecek, 2);
+      SET @KdvIndirilecek = ROUND(@KdvTop - @TevTutar, 2);
+      IF @KdvIndirilecek < 0
+        SET @KdvIndirilecek = 0;
+
+      SET @GenTop = ROUND(@MalTop + @KdvIndirilecek, 2);
+    END;
+  END
+  ELSE IF @HarMal > 0 OR @HarKdv > 0
+  BEGIN
+    IF @HarMal > 0
+      SET @MalTop = @HarMal;
+    IF @HarKdv >= 0
+      SET @KdvTop = @HarKdv;
+    SET @GenTop = ROUND(@MalTop + @KdvTop, 2);
   END;
 
   SET @isAlisLike = CASE WHEN @FatTip IN (1, 8, 9, 11) THEN 1 ELSE 0 END;

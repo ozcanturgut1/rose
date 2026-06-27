@@ -122,4 +122,39 @@ export function computeTevkifatKdvSplit(p) {
 
 }
 
+/**
+ * Tevkifatlı faturada UBL/qnb ödenecek tutarını otorite kabul eder;
+ * indirilecek KDV ve tevkifat tutarını buna göre hizalar.
+ *
+ * @param {ReturnType<typeof computeTevkifatKdvSplit> | null} split
+ * @param {number} payableTl - TL ödenecek (UBL PayableAmount × kur)
+ */
+export function alignTevkifatSplitToPayable(split, payableTl) {
+  if (!split) return null;
+  const payable = roundMoney(payableTl);
+  if (payable <= 0) return split;
+
+  const mal = Number(split.malHizmetToplam) || 0;
+  let toplamKdv = Number(split.toplamKdv) || 0;
+  if (toplamKdv <= 0 && mal > 0) {
+    return { ...split, odenecekTutar: payable };
+  }
+
+  let kdvIndirilecek = roundMoney(payable - mal);
+  if (kdvIndirilecek < 0) kdvIndirilecek = 0;
+  let tevkifatTutar = roundMoney(toplamKdv - kdvIndirilecek);
+  if (tevkifatTutar < 0) tevkifatTutar = 0;
+
+  return {
+    ...split,
+    malHizmetToplam: mal,
+    toplamKdv,
+    kdvIndirilecek,
+    tevkifatTutar,
+    sorumluKdv: tevkifatTutar,
+    odenecekTutar: payable,
+    genelToplam: roundMoney(mal + toplamKdv),
+  };
+}
+
 
