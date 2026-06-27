@@ -8,9 +8,12 @@ import {
   roundMoney,
 } from "./tevkifatMuhasebe.js";
 import {
-  computeUblAuthoritativeAmounts,
-  resolveAmountModel,
-} from "./ublAuthoritativeAmounts.js";
+  computeUblExactAmounts,
+  strictLineNetFromUbl,
+  strictLineTaxFromUbl,
+  strictLineUnitPriceFromUbl,
+} from "./ublExactAmounts.js";
+import { resolveAmountModel } from "./ublAuthoritativeAmounts.js";
 
 let readPoolPromise = null;
 let writePoolPromise = null;
@@ -953,22 +956,22 @@ function extractDocTaxTotalFromUbl(data) {
 }
 
 /**
- * Model A: belge dövizinde matrah / KDV / ödenecek (öncelik qnbRaw → UBL → kalem toplamı).
+ * Belge dövizinde matrah / KDV / ödenecek — öncelik UBL LegalMonetaryTotal (qnbRaw yedek).
  */
 function buildDocTotalsForAmountModel(afterData, q, usableLines) {
   const lmt = extractLegalMonetaryFromUbl(afterData);
-  const lineMalSum = usableLines.reduce((s, x) => s + lineNetFromUbl(x), 0);
-  const lineTaxSum = usableLines.reduce((s, x) => s + lineTaxFromUbl(x), 0);
+  const lineMalSum = usableLines.reduce((s, x) => s + strictLineNetFromUbl(x), 0);
+  const lineTaxSum = usableLines.reduce((s, x) => s + strictLineTaxFromUbl(x), 0);
+  const ublTax = extractDocTaxTotalFromUbl(afterData);
   const qnbMal = parseNum(q.malHizmetToplamTutari ?? afterData?.malHizmetToplamTutari, 0);
   const qnbKdv = parseNum(q.kdvToplamTutari ?? afterData?.kdvToplamTutari, 0);
   const qnbPay = parseNum(q.odenecekTutar, 0);
-  const ublTax = extractDocTaxTotalFromUbl(afterData);
 
   const mal =
-    qnbMal > 0 ? qnbMal : lmt?.lineExtension > 0 ? lmt.lineExtension : lineMalSum;
-  const kdv = qnbKdv > 0 ? qnbKdv : ublTax > 0 ? ublTax : lineTaxSum;
+    lmt?.lineExtension > 0 ? lmt.lineExtension : lineMalSum > 0 ? lineMalSum : qnbMal;
+  const kdv = ublTax > 0 ? ublTax : lineTaxSum > 0 ? lineTaxSum : qnbKdv;
   const payable =
-    qnbPay > 0 ? qnbPay : lmt?.payable > 0 ? lmt.payable : mal + kdv > 0 ? mal + kdv : 0;
+    lmt?.payable > 0 ? lmt.payable : mal + kdv > 0 ? roundMoney(mal + kdv) : qnbPay;
 
   return { mal, kdv, payable };
 }
@@ -1886,13 +1889,12 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
 
   if (amountModel === "ubl") {
     docTotals = buildDocTotalsForAmountModel(afterData, q, usableLines);
-    aligned = computeUblAuthoritativeAmounts({
+    aligned = computeUblExactAmounts({
       usableLines,
       docTotals,
+      afterData,
       isForeignCurrency,
       kur: effectiveDovizKuru,
-      lineNetFromUbl,
-      lineTaxFromUbl,
       parseQty: (line) => parseNum(line?.qty, 1) || 1,
     });
     docOdenecekTutar = aligned.docPayable;
@@ -2168,10 +2170,11 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     const satirAcikSrc = String(lineAcik || l.stokCinsi || l.itemCode || "HIZMET").trim();
     const satirNotu = satirAcikSrc.slice(0, 50);
     const satirAcik = satirAcikSrc.slice(0, 255);
-    const docLineNet = lineNetFromUbl(l);
+    const docLineNet = alignedLine?.docNet ?? strictLineNetFromUbl(l);
+    const docLineUnit = alignedLine?.docUnitPrice ?? strictLineUnitPriceFromUbl(l);
     lineCurrency.push({
       sira: i + 1,
-      dovFiyat: qty > 0 ? roundMoney(docLineNet / qty) : parseNum(l.unitPrice, 0),
+      dovFiyat: docLineUnit,
       dovTutar: docLineNet,
     });
 
@@ -2207,22 +2210,34 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     dr.input("SatirTevkifatTutari", sql.Decimal(18, 4), 0);
     await dr.execute("dbo.sp_Fatura_Detay_Kayit");
 
-    if (amountModel === "ubl" && alignedLine && (alignedLine.netTl > 0 || alignedLine.taxTl > 0)) {
+    const skipFatharPatch = String(process.env.ETA_SKIP_FATHAR_PATCH ?? "").trim() === "1";
+    if (
+      amountModel === "ubl" &&
+      !skipFatharPatch &&
+      alignedLine &&
+      (alignedLine.netTl > 0 || alignedLine.taxTl > 0)
+    ) {
       const netPatch = roundMoney(alignedLine.netTl);
       const taxPatch = roundMoney(alignedLine.taxTl);
+      const dovTutar = roundMoney(alignedLine.docNet ?? 0);
+      const dovFiyat = roundMoney(alignedLine.docUnitPrice ?? 0);
       await wPool
         .request()
         .input("ref", sql.Int, fatFisRefNo)
         .input("sira", sql.Int, i + 1)
         .input("net", sql.Decimal(18, 4), netPatch)
         .input("tax", sql.Decimal(18, 4), taxPatch)
+        .input("dovTut", sql.Decimal(18, 4), dovTutar)
+        .input("dovFyt", sql.Decimal(18, 6), dovFiyat)
         .query(`
           UPDATE dbo.FATHAR
           SET
             FATHARTUTAR = @net,
             FATHARNETTUTAR = @net,
             FATHARKDVMATRAH = @net,
-            FATHARKDVTUTAR = @tax
+            FATHARKDVTUTAR = @tax,
+            FATHARDOVTUTAR = CASE WHEN @dovTut > 0 THEN @dovTut ELSE FATHARDOVTUTAR END,
+            FATHARDOVFIYAT = CASE WHEN @dovFyt > 0 THEN @dovFyt ELSE FATHARDOVFIYAT END
           WHERE FATHARREFNO = @ref AND FATHARSIRANO = @sira
         `);
     }
