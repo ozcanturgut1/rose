@@ -2207,6 +2207,26 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     dr.input("SatirTevkifatTutari", sql.Decimal(18, 4), 0);
     await dr.execute("dbo.sp_Fatura_Detay_Kayit");
 
+    if (amountModel === "ubl" && alignedLine && (alignedLine.netTl > 0 || alignedLine.taxTl > 0)) {
+      const netPatch = roundMoney(alignedLine.netTl);
+      const taxPatch = roundMoney(alignedLine.taxTl);
+      await wPool
+        .request()
+        .input("ref", sql.Int, fatFisRefNo)
+        .input("sira", sql.Int, i + 1)
+        .input("net", sql.Decimal(18, 4), netPatch)
+        .input("tax", sql.Decimal(18, 4), taxPatch)
+        .query(`
+          UPDATE dbo.FATHAR
+          SET
+            FATHARTUTAR = @net,
+            FATHARNETTUTAR = @net,
+            FATHARKDVMATRAH = @net,
+            FATHARKDVTUTAR = @tax
+          WHERE FATHARREFNO = @ref AND FATHARSIRANO = @sira
+        `);
+    }
+
     const stkc = String(l.stokCinsi || "").trim().slice(0, 80);
     const ac = lineAcik;
     if (stkc || ac) {
