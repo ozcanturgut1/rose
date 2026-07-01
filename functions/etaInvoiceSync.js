@@ -277,6 +277,12 @@ function normalizeVknDigits(supplierVkn) {
 const VKN_CARI_SQL =
   "REPLACE(REPLACE(ISNULL(CARVERHESNO,''),' ',''),'-','') = @vkn";
 
+// Gerçek kişi (TCKN'li) carilerde CARVERHESNO boş olabilir; TC kimlik no ETA'da
+// KIMLIKLER tablosunda (KIMMODUL=2, cari kimlikleri) KIMMERNISNO alanında,
+// KIMKOD = CARKOD ilişkisiyle tutulur. Bu koşul, VKN eşleşmesine EK olarak kullanılır.
+const KIMLIK_TCKN_SQL =
+  "REPLACE(REPLACE(ISNULL(k.KIMMERNISNO,''),' ',''),'-','') = @vkn";
+
 async function listCariKodsForVkn(pool, supplierVkn) {
   const digits = normalizeVknDigits(supplierVkn);
   if (!digits) return [];
@@ -284,7 +290,15 @@ async function listCariKodsForVkn(pool, supplierVkn) {
     .request()
     .input("vkn", sql.NVarChar(40), digits)
     .query(
-      `SELECT CARKOD FROM dbo.CARKART WITH (NOLOCK) WHERE ${VKN_CARI_SQL} ORDER BY CARKOD`
+      `SELECT CARKOD FROM (
+         SELECT CARKOD FROM dbo.CARKART WITH (NOLOCK) WHERE ${VKN_CARI_SQL}
+         UNION
+         SELECT k.KIMKOD AS CARKOD
+           FROM dbo.KIMLIKLER k WITH (NOLOCK)
+           INNER JOIN dbo.CARKART c WITH (NOLOCK) ON c.CARKOD = k.KIMKOD
+          WHERE k.KIMMODUL = 2 AND ${KIMLIK_TCKN_SQL}
+       ) q
+       ORDER BY CARKOD`
     );
   return (rs.recordset || []).map((r) => String(r.CARKOD || "").trim()).filter(Boolean);
 }
@@ -304,7 +318,14 @@ async function pickCariByDovizHistoryForVkn(rPool, supplierVkn, currencyCode) {
       SELECT TOP 1 F.FATFISCARKOD AS CARKOD, COUNT(*) AS CNT
       FROM dbo.FATFIS F WITH (NOLOCK)
       INNER JOIN dbo.CARKART C WITH (NOLOCK) ON C.CARKOD = F.FATFISCARKOD
-      WHERE REPLACE(REPLACE(ISNULL(C.CARVERHESNO,''),' ',''),'-','') = @vkn
+      WHERE (
+              REPLACE(REPLACE(ISNULL(C.CARVERHESNO,''),' ',''),'-','') = @vkn
+              OR EXISTS (
+                SELECT 1 FROM dbo.KIMLIKLER k WITH (NOLOCK)
+                 WHERE k.KIMMODUL = 2 AND k.KIMKOD = C.CARKOD
+                   AND ${KIMLIK_TCKN_SQL}
+              )
+            )
         AND UPPER(ISNULL(NULLIF(LTRIM(RTRIM(F.FATFISDOVKOD)), ''), 'TRY')) =
             UPPER(ISNULL(NULLIF(LTRIM(RTRIM(@dovKod)), ''), 'TRY'))
       GROUP BY F.FATFISCARKOD
