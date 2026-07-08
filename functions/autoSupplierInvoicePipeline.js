@@ -4,15 +4,15 @@
  * Her 30 dakikada bir tetiklenir ve son_10_fatura_screen'deki 4 buton ak\u0131\u015f\u0131n\u0131 ayn\u0131 s\u0131rayla
  * otomatik olarak \u00e7al\u0131\u015ft\u0131r\u0131r:
  *
- *  1) suppliers/iplik + suppliers/kumas dok\u00fcmanlar\u0131ndaki VKN'lere ait son 10 g\u00fcnde portala
- *     d\u00fc\u015fen faturalar qnb_invoices'a yaz\u0131l\u0131r ve UBL ile zenginle\u015ftirilir.
+ *  1) suppliers/iplik + suppliers/kumas dok\u00fcmanlar\u0131ndaki VKN'lere ait, tetiklendi\u011fi g\u00fcn
+ *     portala d\u00fc\u015fen faturalar qnb_invoices'a yaz\u0131l\u0131r ve UBL ile zenginle\u015ftirilir.
  *  2) qnb_docs irsaliye \u00f6nbelle\u011fi portala g\u00f6re g\u00fcncellenir (cursor tabanl\u0131 sayfalama,
  *     qnb_sync_state/app.despatchNextStart ile devam eder).
  *  3) qnb_invoices/{id}/despatches alt\u0131ndaki irsaliyelerin ETTN'leri qnb_docs'tan okunup yaz\u0131l\u0131r.
  *  4) ETTN'i dolu olan irsaliyelerin UBL'i (varsa qnb_docs, yoksa portal) despatches'e yaz\u0131l\u0131r.
  *
  * Tasar\u0131m kararlar\u0131:
- *  - Pencere: son 10 g\u00fcn (bug\u00fcn dahil) — son_10_fatura_screen.dart varsay\u0131lan\u0131 ile uyumlu.
+ *  - Pencere: yaln\u0131zca tetiklendi\u011fi g\u00fcn (bug\u00fcn) portala d\u00fc\u015fen faturalar (geli\u015f tarihi).
  *  - VKN filtresi: yaln\u0131z 1. ad\u0131ma uygulan\u0131r; 2-3-4. ad\u0131mlar qnb_invoices \u00fczerinden ilerledi\u011fi
  *    i\u00e7in zaten dolayl\u0131 olarak s\u00fcz\u00fclm\u00fc\u015f olur.
  *  - Kilit: qnb_sync_state/auto_pipeline.lockedUntilMs ile e\u015fzamanl\u0131 ko\u015fmay\u0131 engeller.
@@ -41,8 +41,14 @@ const db = getFirestore();
 // ---------------------------------------------------------------------------
 
 const STATE_DOC = db.collection("qnb_sync_state").doc("auto_pipeline");
-/** Adım 1 — portala düşen fatura tarama penceresi (gün). */
-const ROLLING_WINDOW_DAYS = 10;
+/**
+ * Adım 1 — portala düşen fatura tarama penceresi (gün).
+ * 1 = yalnızca tetiklendiği gün portala düşen (geliş tarihi bugüne ait) faturalar.
+ * Not: QNB `gelenBelgeTutarBilgileriSorgula` start==end iken 0 satır döndürdüğü için
+ * tek gün bile listInvoicesForGelisRangeTwoDay ile [bugün, yarın] chunk'ı olarak
+ * sorgulanır; bu sayede bugünkü gelişler kaçmaz.
+ */
+const ROLLING_WINDOW_DAYS = 1;
 /**
  * Adım 2 — her irsaliye referansı için issueDate etrafında uygulanan dar pencere.
  * `gelenBelgeleriListeleExt` IRSALIYE çağrısı portalda max ~100 satır döner ve

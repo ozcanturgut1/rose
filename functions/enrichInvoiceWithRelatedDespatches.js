@@ -13,6 +13,7 @@ import {
 } from "./extractRelatedBelgeNos.js";
 import { ublToFullJson } from "./ublToStructuredJson.js";
 import { requireAuth, requireRole, ROLES_QNB_MUTATE } from "./requireAuth.js";
+import { detectAracGideri, aracGideriUpdateFields } from "./plakaTespit.js";
 
 const db = getFirestore();
 
@@ -528,6 +529,21 @@ export async function enrichOne(docId) {
   if (fullXmlStr) update.contentUbl = fullXmlStr;
   if (ublKeyValue) update.ublParsed = ublKeyValue;
   if (belgeNoFromUbl) update.belgeNo = belgeNoFromUbl;
+
+  // Araç gideri (kira/yakıt) tedarikçisi ise UBL'den plaka tespit et ve binek/ticari
+  // ayrımını qnb_invoices'a işle. Diğer faturalarda sadece aracGideriTedarikci=false yazılır.
+  try {
+    const aracDet = await detectAracGideri({
+      db,
+      qnbRaw: data.qnbRaw,
+      ublParsed: ublKeyValue,
+      contentUbl: fullXmlStr,
+    });
+    Object.assign(update, aracGideriUpdateFields(aracDet));
+  } catch (aracErr) {
+    logger.warn("enrichOne: plaka tespiti başarısız", docId, aracErr?.message || aracErr);
+  }
+
   await invRef.set(update, { merge: true });
 
   const vknTckn = process.env.QNB_VKN_TCKN;

@@ -14,6 +14,12 @@ import {
   strictLineUnitPriceFromUbl,
 } from "./ublExactAmounts.js";
 import { resolveAmountModel } from "./ublAuthoritativeAmounts.js";
+import {
+  loadAracGiderKurallari,
+  detectGiderTuru,
+  giderMetniFromLines,
+  binekHesaplarForTuru,
+} from "./aracGiderKurallari.js";
 
 let readPoolPromise = null;
 let writePoolPromise = null;
@@ -21,6 +27,7 @@ let cachedDefaults = null;
 let validatedWriteProcedures = false;
 let cachedStkkartColumnNames = null;
 let validatedDenemeMuhasebeProcedure = false;
+let validatedBinekAracProcedure = false;
 
 function sqlConfig(database) {
   const t = resolveSqlTargets();
@@ -106,6 +113,56 @@ async function tryAutoMuhasebeForDeneme(wPool, fatFisRefNo, opts) {
   );
   req.output("MuhFisRefNo", sql.Int);
   await req.execute("dbo.sp_Fatura_Muhasebe_Bagla_Deneme");
+}
+
+async function ensureBinekAracProcedure(wPool) {
+  if (validatedBinekAracProcedure) return;
+  const rs = await wPool
+    .request()
+    .query("SELECT TOP 1 name FROM sys.procedures WHERE name='sp_Fatura_Muhasebe_Bagla_BinekArac'");
+  if (!rs.recordset.length) {
+    const dbName = resolveSqlTargets().writeDb;
+    throw new Error(
+      `Write DB '${dbName}' missing procedure: sp_Fatura_Muhasebe_Bagla_BinekArac. ` +
+        `Deploy: node scripts/patchSpFaturaMuhasebeBaglaBinekArac.js --apply --confirm-write-db=${dbName}`
+    );
+  }
+  validatedBinekAracProcedure = true;
+}
+
+/**
+ * Binek araç gideri muhasebe fişini binek prosedürüyle oluşturur.
+ * Tüm gider türleri işlenir: KIRA (aylık limit), diğerleri (%70/%30 + indirilemeyen
+ * KDV). Yalnızca deneme write DB'de çalışır.
+ * Dönüş: { skipped: bool, reason?, giderTuru, ... }
+ */
+async function tryBinekAracMuhasebe(wPool, fatFisRefNo, opts) {
+  const writeDb = String(resolveSqlTargets().writeDb || "").trim().toLowerCase();
+  const isDeneme = writeDb === "eta_deneme_2026";
+  const enabled = String(process.env.ETA_DENEME_AUTO_MUHASEBE ?? "1").trim() !== "0";
+  if (!isDeneme || !enabled) return { skipped: true, reason: "muhasebe_disabled" };
+
+  const giderTuru = String(opts?.giderTuru || "DIGER").toUpperCase();
+  const rules = opts?.rules || {};
+  const h = rules.hesaplar || {};
+  const { kabulHesap, kkegHesap } = binekHesaplarForTuru(giderTuru, h);
+  const indirilemeyenKdv = h.indirilemeyenKdv;
+  if (!kabulHesap || !kkegHesap || !indirilemeyenKdv) {
+    return { skipped: true, reason: "hesap_kodu_eksik", giderTuru };
+  }
+
+  await ensureBinekAracProcedure(wPool);
+  const req = wPool.request();
+  req.input("FatFisRefNo", sql.Int, fatFisRefNo);
+  req.output("MuhFisRefNo", sql.Int);
+  req.input("GiderTuru", sql.NVarChar(10), giderTuru);
+  req.input("KabulHesap", sql.VarChar(40), kabulHesap);
+  req.input("KkegHesap", sql.VarChar(40), kkegHesap);
+  req.input("IndirilemeyenKdvHesap", sql.VarChar(40), indirilemeyenKdv);
+  req.input("KabulOrani", sql.Decimal(9, 4), Number(rules.giderKabulOrani) || 0.7);
+  req.input("KiraLimiti", sql.Decimal(28, 2), Number(rules.kiraAylikLimit) || 46000);
+  await req.execute("dbo.sp_Fatura_Muhasebe_Bagla_BinekArac");
+  return { skipped: false, giderTuru, kabulHesap, kkegHesap };
 }
 
 function norm(s) {
@@ -2304,12 +2361,31 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   });
 
   await patchCariCurrencyFromFatFis(wPool, fatFisRefNo);
+
+  // Binek araç gideri (yakıt/kira): %70/%30 + KKEG + indirilemeyen KDV kuralıyla
+  // ayrı binek prosedürü çağrılır. Ticari/araç dışı faturalar mevcut normal
+  // muhasebe akışını (hiç değişmeden) kullanır.
+  const aracTipi = String(afterData?.aracTespit?.aracTipi || "").trim().toLowerCase();
   // ALIM (FATFISTIPI=1): muhasebe her zaman kalem bazlı; referans SP'ye gönderilmez.
-  const muhasebeRefForSp =
-    Number(erpFaturaTipiNo) === 1 ? 0 : refFatFisForMuhasebe;
-  await tryAutoMuhasebeForDeneme(wPool, fatFisRefNo, {
-    refFatFisRefNo: muhasebeRefForSp,
-  });
+  const muhasebeRefForSp = Number(erpFaturaTipiNo) === 1 ? 0 : refFatFisForMuhasebe;
+  let binekMuhasebe = null;
+  if (aracTipi === "binek" && !cls?.hasTevkifat) {
+    const rules = await loadAracGiderKurallari(getFirestore());
+    const giderTuru = detectGiderTuru(giderMetniFromLines(usableLines));
+    binekMuhasebe = await tryBinekAracMuhasebe(wPool, fatFisRefNo, { giderTuru, rules });
+    if (binekMuhasebe?.skipped) {
+      console.warn(
+        "syncApprovedInvoiceToEta: binek araç muhasebe atlandı (normal SP çağrılmadı)",
+        docId,
+        binekMuhasebe.reason,
+        binekMuhasebe.giderTuru
+      );
+    }
+  } else {
+    await tryAutoMuhasebeForDeneme(wPool, fatFisRefNo, {
+      refFatFisRefNo: muhasebeRefForSp,
+    });
+  }
 
   const verify = await wPool
     .request()
@@ -2323,6 +2399,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     stokFisRefNo,
     muhFisRefNo: verify.recordset[0]?.FATFISMUHREFNO || 0,
     muhasebeRefFatFisRefNo: muhasebeRefForSp || 0,
+    ...(binekMuhasebe && { binekAracMuhasebe: binekMuhasebe }),
     erpCariKodu,
     cariResolveReason: cariResolved?.reason || null,
     lineCount: usableLines.length,
