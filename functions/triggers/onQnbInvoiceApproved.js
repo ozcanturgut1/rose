@@ -107,6 +107,25 @@ export const onQnbInvoiceApproved = onDocumentUpdated(
 
     try {
       const result = await syncApprovedInvoiceToEta(after, docId);
+      // Kur farkı faturası birden fazla döviz cariye denk gelip belirsizse: kayıt yapılmaz,
+      // neden Firestore'a yazılır (arayüzde gösterilir), arşivlenmez.
+      if (result?.blocked) {
+        await ref.set(
+          {
+            etaKayitDurumu: "beklemede_kurfarki",
+            etaKayitGuncellemeTarihi: FieldValue.serverTimestamp(),
+            etaKayitHata: result.blockMessage || "Kur farkı faturası: cari belirlenemedi.",
+            etaKayitDetay: {
+              status: result.status || "blocked_kurfarki",
+              blockReason: result.blockReason || null,
+              adaylar: Array.isArray(result.blockDetail?.adaylar) ? result.blockDetail.adaylar : [],
+            },
+          },
+          { merge: true }
+        );
+        console.warn("onQnbInvoiceApproved: kur farkı belirsiz, ETA kaydı yapılmadı", docId, result.blockReason);
+        return;
+      }
       await ref.set(
         {
           etaKayitDurumu: "tamamlandi",

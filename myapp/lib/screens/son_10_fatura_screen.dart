@@ -206,7 +206,15 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
       'odenecekTutar': qm['odenecekTutar'],
       'odenecekTutarDovizCinsi': qm['odenecekTutarDovizCinsi'],
       'gondericiUnvanDisplay': _gondericiUnvanFromDoc(data),
+      'etaKayitDurumu': data['etaKayitDurumu'],
+      'etaKayitHata': data['etaKayitHata'],
     };
+  }
+
+  /// ETA kaydı sorunlu mu? (kayıt yapılmadı/hata) — arayüzde uyarı gösterilir.
+  static bool _etaKayitSorunlu(dynamic durum) {
+    final s = durum?.toString().trim().toLowerCase().replaceAll('ı', 'i') ?? '';
+    return s == 'beklemede_kurfarki' || s == 'beklemede_plaka' || s == 'hata';
   }
 
   static const String _nihaiOnayDurumuValue = 'onaya sunuldu';
@@ -1170,6 +1178,10 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
                                     final gUnvan = (it['gondericiUnvanDisplay']?.toString() ?? '').trim();
                                     final gonderenStr =
                                         gUnvan.isNotEmpty ? gUnvan : _gondericiUnvanFromDoc(it);
+                                    final etaSorunlu =
+                                        _etaKayitSorunlu(it['etaKayitDurumu']);
+                                    final etaHataMetni =
+                                        (it['etaKayitHata']?.toString() ?? '').trim();
                                     final baseTitle = belgeNo.isNotEmpty
                                         ? belgeNo
                                         : (gonderenStr.isNotEmpty ? gonderenStr : '—');
@@ -1225,6 +1237,40 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
                                               style: TextStyle(
                                                 fontSize: 12,
                                                 color: Theme.of(context).colorScheme.primary,
+                                              ),
+                                            ),
+                                          if (etaSorunlu)
+                                            Container(
+                                              margin: const EdgeInsets.only(top: 6),
+                                              padding: const EdgeInsets.symmetric(
+                                                  horizontal: 8, vertical: 6),
+                                              decoration: BoxDecoration(
+                                                color: Colors.orange.withOpacity(0.12),
+                                                borderRadius: BorderRadius.circular(6),
+                                                border: Border.all(
+                                                    color: Colors.orange.shade700),
+                                              ),
+                                              child: Row(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  Icon(Icons.warning_amber_rounded,
+                                                      size: 18,
+                                                      color: Colors.orange.shade800),
+                                                  const SizedBox(width: 6),
+                                                  Expanded(
+                                                    child: Text(
+                                                      etaHataMetni.isNotEmpty
+                                                          ? 'ETA kaydı yapılmadı: $etaHataMetni'
+                                                          : 'ETA kaydı yapılmadı (kontrol gerekiyor).',
+                                                      style: TextStyle(
+                                                        fontSize: 12,
+                                                        color: Colors.orange.shade900,
+                                                        fontWeight: FontWeight.w500,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ],
                                               ),
                                             ),
                                         ],

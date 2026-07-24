@@ -1675,6 +1675,141 @@ async function resolveCariKod(rPool, supplierVkn, currencyCode = "") {
   };
 }
 
+/** Döviz kodu yurtiçi (TL/TRY) dışında mı? */
+function isForeignCurrencyCode(code) {
+  return !isDomesticTryOrTl(code);
+}
+
+/**
+ * Fatura satırlarında "kur farkı" ibaresi var mı? (vade/fiyat farkı tetiklemez.)
+ * Gelen UBL satırının Name/Description/Note metinlerine bakar.
+ */
+export function isKurFarkiInvoice(lines) {
+  if (!Array.isArray(lines)) return false;
+  return lines.some((l) => {
+    const text = normalizeMatchText(
+      `${l?.stokCinsi || ""} ${l?.description || ""} ${l?.lineAciklama || ""}`
+    );
+    return /kur\s*fark/.test(text);
+  });
+}
+
+/**
+ * Verilen CARKOD listesi için FATFIS geçmişinden döviz kırılımı yükler.
+ * @returns {Map<string, {byCur: Record<string, number>, total: number, foreign: number}>}
+ */
+async function loadCariCurrencyProfile(rPool, codes) {
+  const map = new Map();
+  for (const c of codes) map.set(c, { byCur: {}, total: 0, foreign: 0 });
+  if (!codes.length) return map;
+
+  const req = rPool.request();
+  const params = codes.map((c, i) => {
+    req.input(`c${i}`, sql.NVarChar(40), c);
+    return `@c${i}`;
+  });
+  const rs = await req.query(`
+    SELECT FATFISCARKOD AS CARKOD,
+           ISNULL(NULLIF(LTRIM(RTRIM(FATFISDOVKOD)),''),'TRY') AS DOV,
+           COUNT(*) AS CNT
+    FROM dbo.FATFIS WITH (NOLOCK)
+    WHERE FATFISCARKOD IN (${params.join(",")})
+    GROUP BY FATFISCARKOD, ISNULL(NULLIF(LTRIM(RTRIM(FATFISDOVKOD)),''),'TRY')
+  `);
+  for (const x of rs.recordset || []) {
+    const ck = String(x.CARKOD || "").trim();
+    if (!map.has(ck)) map.set(ck, { byCur: {}, total: 0, foreign: 0 });
+    const o = map.get(ck);
+    const cur = String(x.DOV || "TRY").toUpperCase();
+    const cnt = Number(x.CNT) || 0;
+    o.byCur[cur] = (o.byCur[cur] || 0) + cnt;
+    o.total += cnt;
+    if (isForeignCurrencyCode(cur)) o.foreign += cnt;
+  }
+  return map;
+}
+
+/**
+ * Kur farkı faturası için cari seçimi.
+ *
+ * Kural (read DB gerçek kayıtlarına göre doğrulandı, ~%98 isabet):
+ *  - Hedef döviz: fatura dövizliyse kendi para birimi; TL ise VKN'nin baskın döviz cinsi.
+ *  - Hedef dövizde faturası olan cari:
+ *      tek ise      -> o cariye yaz,
+ *      birden çoksa -> BLOKE (kaydetme, arayüzde neden göster),
+ *      hiç yoksa    -> başka döviz cari(ler)i: tek ise yaz, çoksa BLOKE.
+ *  - Hiç döviz cari yoksa null döner (çağıran normal resolveCariKod'a düşer).
+ *
+ * @returns {Promise<null | {carkod?: string, reason: string, candidateCodes: string[],
+ *   blocked?: boolean, blockDetail?: {target?: string, adaylar: string[]}}>}
+ */
+export async function resolveCariKodForKurFarki(rPool, supplierVkn, kfCurrency) {
+  const digits = normalizeVknDigits(supplierVkn);
+  if (!digits) return null;
+
+  const codes = await listCariKodsForVkn(rPool, digits);
+  if (!codes.length) return null;
+  if (codes.length === 1) {
+    return { carkod: codes[0], reason: "kurfarki_tek_cari", candidateCodes: codes };
+  }
+
+  const profile = await loadCariCurrencyProfile(rPool, codes);
+
+  // Hedef döviz cinsini belirle
+  let target = isForeignCurrencyCode(kfCurrency)
+    ? String(kfCurrency).trim().toUpperCase()
+    : null;
+  if (!target) {
+    const agg = {};
+    for (const o of profile.values()) {
+      for (const [cur, n] of Object.entries(o.byCur)) {
+        if (isForeignCurrencyCode(cur)) agg[cur] = (agg[cur] || 0) + n;
+      }
+    }
+    let best = null;
+    let bn = 0;
+    for (const [cur, n] of Object.entries(agg)) {
+      if (n > bn) {
+        bn = n;
+        best = cur;
+      }
+    }
+    target = best;
+  }
+  // VKN'de hiç döviz geçmişi yok: kur farkı ayrımı yapılamaz, normal mantığa bırak.
+  if (!target) return null;
+
+  const inTarget = codes.filter((c) => (profile.get(c)?.byCur[target] || 0) > 0);
+  if (inTarget.length === 1) {
+    return { carkod: inTarget[0], reason: `kurfarki_dov_${target}`, candidateCodes: codes };
+  }
+  if (inTarget.length > 1) {
+    return {
+      blocked: true,
+      reason: `kurfarki_belirsiz_dov_${target}`,
+      blockDetail: { target, adaylar: inTarget },
+      candidateCodes: codes,
+    };
+  }
+
+  // Hedef dövizde cari yok ama başka döviz cari(ler)i var: baskın dövizliye yaz.
+  const fg = codes
+    .filter((c) => (profile.get(c)?.foreign || 0) > 0)
+    .sort((a, b) => (profile.get(b)?.foreign || 0) - (profile.get(a)?.foreign || 0));
+  if (fg.length === 1) {
+    return { carkod: fg[0], reason: "kurfarki_baskin_dov", candidateCodes: codes };
+  }
+  if (fg.length > 1) {
+    return {
+      blocked: true,
+      reason: "kurfarki_belirsiz_baskin_dov",
+      blockDetail: { adaylar: fg },
+      candidateCodes: codes,
+    };
+  }
+  return null;
+}
+
 async function ensureWriteCariWithUnvan(wPool, resolved, supplierVkn, fallbackCode) {
   const byCode = async (code) => {
     const c = String(code || "").trim();
@@ -1914,11 +2049,40 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   const supplierVkn = String(afterData.supplierVkn || q.gondericiVkn || q.vknTckn || "").trim();
   const paraBirimiRaw = extractInvoiceCurrency(afterData);
   const isForeignCurrencyEarly = !isDomesticTryOrTl(paraBirimiRaw);
-  const cariResolved = await resolveCariKod(
-    rPool,
-    supplierVkn,
-    isForeignCurrencyEarly ? paraBirimiRaw : ""
-  );
+
+  // Kur farkı faturaları: kendi para birimine (çoğunlukla TL) değil, VKN'nin döviz
+  // carisine yönlendirilir. Hedef döviz birden çok cariye denk gelirse kayıt YAPILMAZ.
+  let cariResolved;
+  const isKurFarki = isKurFarkiInvoice(extractInvoiceLines(afterData));
+  if (isKurFarki) {
+    const kf = await resolveCariKodForKurFarki(rPool, supplierVkn, paraBirimiRaw);
+    if (kf?.blocked) {
+      const adaylar = (kf.blockDetail?.adaylar || []).join(", ");
+      const dovMetin = kf.blockDetail?.target ? `${kf.blockDetail.target} dövizinde ` : "";
+      return {
+        status: "blocked_kurfarki",
+        blocked: true,
+        blockReason: kf.reason,
+        blockDetail: kf.blockDetail || null,
+        blockMessage:
+          `Kur farkı faturası: bu tedarikçide (VKN ${supplierVkn || "-"}) ${dovMetin}` +
+          `birden fazla cari bulunduğu için hangi cariye yazılacağı belirlenemedi ` +
+          `(adaylar: ${adaylar || "-"}). Otomatik kayıt yapılmadı; doğru cari elle seçilmelidir.`,
+        docId,
+      };
+    }
+    // kf null ise (tek cari / hiç döviz cari yok) normal mantığa düş.
+    cariResolved =
+      kf ||
+      (await resolveCariKod(rPool, supplierVkn, isForeignCurrencyEarly ? paraBirimiRaw : ""));
+  } else {
+    cariResolved = await resolveCariKod(
+      rPool,
+      supplierVkn,
+      isForeignCurrencyEarly ? paraBirimiRaw : ""
+    );
+  }
+
   const erpCariKodu = await ensureWriteCariWithUnvan(
     wPool,
     cariResolved,

@@ -33,6 +33,22 @@ async function processDoc(db, docSnap) {
 
   try {
     const result = await syncApprovedInvoiceToEta(data, docId);
+    if (result?.blocked) {
+      await ref.set(
+        {
+          etaKayitDurumu: "beklemede_kurfarki",
+          etaKayitGuncellemeTarihi: FieldValue.serverTimestamp(),
+          etaKayitHata: result.blockMessage || "Kur farkı faturası: cari belirlenemedi.",
+          etaKayitDetay: {
+            status: result.status || "blocked_kurfarki",
+            blockReason: result.blockReason || null,
+            adaylar: Array.isArray(result.blockDetail?.adaylar) ? result.blockDetail.adaylar : [],
+          },
+        },
+        { merge: true }
+      );
+      return { skipped: false, blocked: true, reason: result.blockReason };
+    }
     await ref.set(
       {
         etaKayitDurumu: "tamamlandi",
@@ -93,6 +109,7 @@ async function runBatch(limitPerStatus) {
   let ok = 0;
   let err = 0;
   let skipped = 0;
+  let blocked = 0;
   for (const d of docs.values()) {
     const r = await processDoc(db, d);
     if (r.skipped) {
@@ -102,13 +119,16 @@ async function runBatch(limitPerStatus) {
     if (r.error) {
       err++;
       console.log(`[ERR] ${d.id}: ${r.error}`);
+    } else if (r.blocked) {
+      blocked++;
+      console.log(`[BLOCKED] ${d.id}: ${r.reason}`);
     } else {
       ok++;
       console.log(`[OK] ${d.id}: ${JSON.stringify(r.result)}`);
     }
   }
   console.log(
-    `Batch done. total=${docs.size} ok=${ok} error=${err} skipped=${skipped}`
+    `Batch done. total=${docs.size} ok=${ok} blocked=${blocked} error=${err} skipped=${skipped}`
   );
 }
 
