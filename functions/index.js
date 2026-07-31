@@ -27,6 +27,7 @@ import { enrichInvoiceDespatchesUblByEttn } from "./enrichInvoiceDespatchesUblBy
 import { updateQnbInvoiceYonetimOnay } from "./updateQnbInvoiceYonetimOnay.js";
 import { listAraOnayUsers } from "./listAraOnayUsers.js";
 import { assignQnbInvoiceAraOnay } from "./assignQnbInvoiceAraOnay.js";
+import { archiveQnbInvoice } from "./archiveQnbInvoice.js";
 import { onQnbInvoiceApproved } from "./triggers/onQnbInvoiceApproved.js";
 import { autoSupplierInvoicePipeline } from "./autoSupplierInvoicePipeline.js";
 
@@ -54,6 +55,7 @@ export {
   updateQnbInvoiceYonetimOnay,
   listAraOnayUsers,
   assignQnbInvoiceAraOnay,
+  archiveQnbInvoice,
   onQnbInvoiceApproved,
   autoSupplierInvoicePipeline,
 };

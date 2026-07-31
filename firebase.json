@@ -114,6 +114,11 @@
         "source": "/api/assignQnbInvoiceAraOnay",
         "function": "assignQnbInvoiceAraOnay",
         "region": "europe-west1"
+      },
+      {
+        "source": "/api/archiveQnbInvoice",
+        "function": "archiveQnbInvoice",
+        "region": "europe-west1"
       }
     ]
   }

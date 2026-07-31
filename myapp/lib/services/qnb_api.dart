@@ -26,6 +26,7 @@ class QnbApi {
     required this.baseUpdateQnbInvoiceYonetimOnayUrl,
     required this.baseListAraOnayUsersUrl,
     required this.baseAssignQnbInvoiceAraOnayUrl,
+    required this.baseArchiveQnbInvoiceUrl,
   });
 
   final String baseListUrl;    // https://listqnbdocs-...a.run.app
@@ -50,6 +51,8 @@ class QnbApi {
   final String baseUpdateQnbInvoiceYonetimOnayUrl;
   final String baseListAraOnayUsersUrl;
   final String baseAssignQnbInvoiceAraOnayUrl;
+  /// Muhasebe kontrolü sonrası faturayı ve irsaliyelerini arşiv koleksiyonlarına taşır.
+  final String baseArchiveQnbInvoiceUrl;
 
   Future<String> _idToken() async {
     final auth = FirebaseAuth.instance;
@@ -195,6 +198,26 @@ class QnbApi {
     if (r.statusCode >= 400) {
       throw Exception('ASSIGN_ARA_ONAY_FAILED ${r.statusCode}: ${r.body}');
     }
+  }
+
+  /// Muhasebe: ETA kaydı tamamlanmış faturayı ilgili irsaliyelerle birlikte arşive taşır.
+  Future<Map<String, dynamic>> archiveQnbInvoice({required String docId}) async {
+    final token = await _idToken();
+    final uri = Uri.parse(baseArchiveQnbInvoiceUrl);
+    final r = await http.post(
+      uri,
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: jsonEncode({'docId': docId.trim()}),
+    );
+    if (r.statusCode >= 400) {
+      throw Exception('ARCHIVE_INVOICE_FAILED ${r.statusCode}: ${r.body}');
+    }
+    final decoded = jsonDecode(r.body);
+    return (decoded as Map).cast<String, dynamic>();
   }
 
   /// Faturanın irsaliyelerini ve her birinin görüntü özetini (belgeOzet) döndürür.

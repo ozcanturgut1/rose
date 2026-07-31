@@ -20,7 +20,11 @@ import 'invoice_pdf_review_screen.dart';
 ///
 /// - `ara_onay` → `onayDurumu` boş
 /// - `nihai_onay` → `onayDurumu == onaya sunuldu`
-/// - `muhasebe` → açılır liste: onaylandı / reddedildi / onay bekliyor (Ara+Nihai kuyrukları)
+/// - `muhasebe` → açılır liste: arşiv bekliyor / onaylandı / reddedildi / onay bekliyor (Ara+Nihai kuyrukları)
+///
+/// **Arşiv bekliyor**: nihai onay sonrası ETA fatura kaydı tamamlanmış, ancak fatura ve
+/// irsaliyeleri henüz arşive taşınmamış kayıtlar. Muhasebe kaydı kontrol edip
+/// **Arşive Taşı** ile [QnbApi.archiveQnbInvoice] çağırır.
 ///
 /// İrsaliyeleri `qnb_docs` önbelleğine almak (yalnız admin UI): **kamyon** ikonu veya
 /// ilgili butonlar → [QnbApi.syncAllDespatches].
@@ -43,7 +47,7 @@ class Son10FaturaScreen extends StatefulWidget {
 }
 
 /// Muhasebe listesi: Firestore `onayDurumu` veya bekleyen kuyruk görünümü.
-enum _MuhasebeFiltre { onaylandi, reddedildi, onayBekliyor }
+enum _MuhasebeFiltre { arsivBekliyor, onaylandi, reddedildi, onayBekliyor }
 
 class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
   bool loading = true;
@@ -56,7 +60,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
   /// Admin listesinde sayfa indeksi (0 tabanlı); yalnızca görünüm — API tek seferde yüklenir.
   int _adminListPage = 0;
 
-  _MuhasebeFiltre _muhasebeFiltre = _MuhasebeFiltre.onaylandi;
+  _MuhasebeFiltre _muhasebeFiltre = _MuhasebeFiltre.arsivBekliyor;
   /// Son başarılı `listGelenBelgeleriExt` yanıtı (debug).
   String? _lastResponseJson;
 
@@ -208,6 +212,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
       'gondericiUnvanDisplay': _gondericiUnvanFromDoc(data),
       'etaKayitDurumu': data['etaKayitDurumu'],
       'etaKayitHata': data['etaKayitHata'],
+      'arsivDurumu': data['arsivDurumu'],
     };
   }
 
@@ -215,6 +220,18 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
   static bool _etaKayitSorunlu(dynamic durum) {
     final s = durum?.toString().trim().toLowerCase().replaceAll('ı', 'i') ?? '';
     return s == 'beklemede_kurfarki' || s == 'beklemede_plaka' || s == 'hata';
+  }
+
+  /// ETA fatura kaydı tamamlanmış, muhasebe kontrolü ile arşive taşınmayı bekleyen fatura.
+  ///
+  /// `arsivDurumu` alanı yazılmamış eski kayıtlar için `etaKayitDurumu == tamamlandi` yeterlidir.
+  static bool _arsiveTasinmayiBekliyor(Map<String, dynamic> data) {
+    final arsiv = data['arsivDurumu']?.toString().trim().toLowerCase() ?? '';
+    if (arsiv == 'arsiv_bekliyor') return true;
+    if (arsiv.isNotEmpty) return false;
+    final eta =
+        data['etaKayitDurumu']?.toString().trim().toLowerCase().replaceAll('ı', 'i') ?? '';
+    return eta == 'tamamlandi';
   }
 
   static const String _nihaiOnayDurumuValue = 'onaya sunuldu';
@@ -355,7 +372,8 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
 
   /// Firestore — tarih süzmesi yok; şarta uyan tüm `invoice_*` faturalar.
   ///
-  /// **nihai / muhasebe (onaylandı|reddedildi):** `onayDurumu` eşitliği + `orderBy(__name__)` (bileşik indeks gerekebilir).
+  /// **nihai / muhasebe (arşiv bekliyor|onaylandı|reddedildi):** `onayDurumu` eşitliği + `orderBy(__name__)` (bileşik indeks gerekebilir).
+  /// **muhasebe · arşiv bekliyor:** `onaylandı` sorgusu + bellekte [_arsiveTasinmayiBekliyor] süzmesi.
   /// **muhasebe · onay bekliyor:** Ara (boş `onayDurumu`) + Nihai (`onaya sunuldu`) birleşik liste.
   /// **ara:** Koleksiyonun tamamı taranır.
   Future<List<Map<String, dynamic>>> _fetchInvoicesFromFirestoreOnly() async {
@@ -453,6 +471,10 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
           if (!_onayDurumuIsReddedildi(data['onayDurumu'])) continue;
         } else {
           if (!_onayDurumuIsOnaylandi(data['onayDurumu'])) continue;
+          if (_muhasebeFiltre == _MuhasebeFiltre.arsivBekliyor &&
+              !_arsiveTasinmayiBekliyor(data)) {
+            continue;
+          }
         }
       }
       final item = _invoiceDocToListItem(data);
@@ -849,6 +871,57 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     }
   }
 
+  /// Muhasebe: kaydı kontrol edilen faturayı ilgili irsaliyelerle birlikte arşive taşır.
+  Future<void> _arsiveTasi(BuildContext context, Map<String, dynamic> it) async {
+    final docId = (it['invoiceDocId']?.toString() ?? '').trim();
+    if (docId.isEmpty) {
+      setState(() => error = 'Fatura kaydı bulunamadı (docId yok).');
+      return;
+    }
+    final belgeNo = (it['belgeNo']?.toString() ?? '').trim();
+    final onaylandi = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Arşive taşınsın mı?'),
+        content: Text(
+          belgeNo.isEmpty
+              ? 'Fatura ve ilgili irsaliyeler arşive taşınacak. Bu işlem geri alınamaz.'
+              : '$belgeNo numaralı fatura ve ilgili irsaliyeler arşive taşınacak. Bu işlem geri alınamaz.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Vazgeç'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Arşive Taşı'),
+          ),
+        ],
+      ),
+    );
+    if (onaylandi != true) return;
+
+    setState(() {
+      loading = true;
+      error = null;
+    });
+    try {
+      await widget.api.archiveQnbInvoice(docId: docId);
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Fatura ve ilgili irsaliyeler arşive taşındı.')),
+      );
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        error = e.toString();
+        loading = false;
+      });
+    }
+  }
+
   Future<void> _openInvoicePdfReview(Map<String, dynamic> it) async {
     final belgeNo = (it['belgeNo']?.toString() ?? '').trim();
     if (belgeNo.isEmpty) {
@@ -1129,6 +1202,10 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
                 ),
                 items: const [
                   DropdownMenuItem(
+                    value: _MuhasebeFiltre.arsivBekliyor,
+                    child: Text('Arşiv bekliyor'),
+                  ),
+                  DropdownMenuItem(
                     value: _MuhasebeFiltre.onaylandi,
                     child: Text('Onaylandı'),
                   ),
@@ -1190,6 +1267,9 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
 
                                     final isAdmin = _listFilterMode == 'admin';
                                     final isAraOnay = _listFilterMode == 'ara_onay';
+                                    final arsiveTasinabilir =
+                                        _listFilterMode == 'muhasebe' &&
+                                            _arsiveTasinmayiBekliyor(it);
                                     final myUid = FirebaseAuth.instance.currentUser?.uid ?? '';
                                     final atanan =
                                         (it['araOnayAtananUid']?.toString() ?? '').trim();
@@ -1273,6 +1353,31 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
                                                 ],
                                               ),
                                             ),
+                                          if (arsiveTasinabilir) ...[
+                                            const Padding(
+                                              padding: EdgeInsets.only(top: 6),
+                                              child: Text(
+                                                'Fatura kaydı yapıldı; kontrol sonrası arşive taşıyın.',
+                                                style: TextStyle(fontSize: 12),
+                                              ),
+                                            ),
+                                            Align(
+                                              alignment: Alignment.centerLeft,
+                                              child: FilledButton.tonalIcon(
+                                                style: FilledButton.styleFrom(
+                                                  padding: const EdgeInsets.symmetric(
+                                                      horizontal: 12, vertical: 4),
+                                                  visualDensity: VisualDensity.compact,
+                                                ),
+                                                onPressed: loading
+                                                    ? null
+                                                    : () => _arsiveTasi(context, it),
+                                                icon: const Icon(Icons.archive_outlined,
+                                                    size: 18),
+                                                label: const Text('Arşive Taşı'),
+                                              ),
+                                            ),
+                                          ],
                                         ],
                                       ),
                                       isThreeLine: false,

@@ -5,7 +5,6 @@ ensureAdmin();
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { syncApprovedInvoiceToEta } from "../etaInvoiceSync.js";
 import { formatEtaError } from "../etaError.js";
-import { archiveCompletedInvoice } from "../archiveCompletedInvoice.js";
 import { detectAracGideri, aracGideriUpdateFields } from "../plakaTespit.js";
 
 function normalizeStatus(value) {
@@ -142,21 +141,13 @@ export const onQnbInvoiceApproved = onDocumentUpdated(
             lineMatches: Array.isArray(result.lineMatches) ? result.lineMatches : [],
           },
           etaKayitHata: FieldValue.delete(),
+          // Arşivleme otomatik değil: muhasebe kaydı kontrol edip "Arşive Taşı" ile tetikler.
+          arsivDurumu: "arsiv_bekliyor",
+          arsivBekliyorTarihi: FieldValue.serverTimestamp(),
         },
         { merge: true }
       );
-      console.log("onQnbInvoiceApproved: sql sync completed", docId, result);
-
-      try {
-        const archiveResult = await archiveCompletedInvoice(docId, { skipStatusCheck: true });
-        console.log("onQnbInvoiceApproved: archive completed", docId, archiveResult);
-      } catch (archiveErr) {
-        console.error(
-          "onQnbInvoiceApproved: archive failed",
-          docId,
-          archiveErr?.message || archiveErr
-        );
-      }
+      console.log("onQnbInvoiceApproved: sql sync completed, arşiv muhasebe onayı bekliyor", docId, result);
     } catch (err) {
       const msg = formatEtaError(err);
       await ref.set(
