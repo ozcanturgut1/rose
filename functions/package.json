@@ -19,7 +19,9 @@
     "eta:patch-procs-null-safe": "node scripts/patchEtaDenemeProceduresNullSafe.js",
     "eta:patch-fatura-tip-sp": "node scripts/patchSpFaturaKayitCariBakiyeAllTypes.js",
     "eta:patch-fatura-detay-tip-sp": "node scripts/patchSpFaturaDetayKayitStokAllTypes.js",
-    "eta:patch-muhasebe-tevkifat": "node scripts/patchSpFaturaMuhasebeBaglaTevkifat.js"
+    "eta:patch-muhasebe-tevkifat": "node scripts/patchSpFaturaMuhasebeBaglaTevkifat.js",
+    "eta:patch-yan-etki": "node scripts/patchSpFaturaYanEtkiKayit.js",
+    "eta:deploy-proc-copies": "node scripts/deployFaturaProcCopies.js"
   },
   "engines": {
     "node": "22"

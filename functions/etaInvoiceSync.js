@@ -21,6 +21,7 @@ import {
   binekHesaplarForTuru,
 } from "./aracGiderKurallari.js";
 import { buildMuhasebeFisiSnapshot } from "./etaMuhasebeFisi.js";
+import { resolveFaturaProcNames } from "./etaFaturaProcNames.js";
 
 let readPoolPromise = null;
 let writePoolPromise = null;
@@ -29,6 +30,7 @@ let validatedWriteProcedures = false;
 let cachedStkkartColumnNames = null;
 let validatedDenemeMuhasebeProcedure = false;
 let validatedBinekAracProcedure = false;
+let validatedDenemeYanEtkiProcedure = false;
 
 function sqlConfig(database) {
   const t = resolveSqlTargets();
@@ -67,11 +69,8 @@ async function writePool() {
 
 async function ensureWriteProcedures(pool) {
   if (validatedWriteProcedures) return;
-  const required = [
-    "sp_Fatura_Kayit",
-    "sp_Fatura_Detay_Kayit",
-    "sp_FatFisToplam_Kayit",
-  ];
+  const procs = resolveFaturaProcNames();
+  const required = [procs.kayit, procs.detay, procs.toplam];
   const rs = await pool.request().query(
     `SELECT name FROM sys.procedures WHERE name IN (${required.map((n) => `'${n}'`).join(",")})`
   );
@@ -164,6 +163,40 @@ async function tryBinekAracMuhasebe(wPool, fatFisRefNo, opts) {
   req.input("KiraLimiti", sql.Decimal(28, 2), Number(rules.kiraAylikLimit) || 46000);
   await req.execute("dbo.sp_Fatura_Muhasebe_Bagla_BinekArac");
   return { skipped: false, giderTuru, kabulHesap, kkegHesap };
+}
+
+async function ensureDenemeYanEtkiProcedure(pool) {
+  if (validatedDenemeYanEtkiProcedure) return;
+  const rs = await pool
+    .request()
+    .query("SELECT TOP 1 name FROM sys.procedures WHERE name='sp_Fatura_YanEtki_Kayit'");
+  if (!rs.recordset.length) {
+    const dbName = resolveSqlTargets().writeDb;
+    throw new Error(
+      `Write DB '${dbName}' missing procedure: sp_Fatura_YanEtki_Kayit. ` +
+        `Deploy: node scripts/patchSpFaturaYanEtkiKayit.js --apply --confirm-write-db=${dbName}`
+    );
+  }
+  validatedDenemeYanEtkiProcedure = true;
+}
+
+/**
+ * ETA arayüzünün yazdığı MUHMIZDEGER / STKMIZDEGER / HARREFNO yan etkileri.
+ * Yalnızca deneme write DB. Mizan adımları tekrar çalışırsa bakiyeyi ikiye katlar;
+ * çağıran taraf apply* bayraklarıyla tek sefer güvencesi verir.
+ */
+async function tryDenemeYanEtkiKayit(wPool, fatFisRefNo, opts) {
+  const writeDb = String(resolveSqlTargets().writeDb || "").trim().toLowerCase();
+  const isDeneme = writeDb === "eta_deneme_2026";
+  if (!isDeneme) return { skipped: true, reason: "not_deneme" };
+  await ensureDenemeYanEtkiProcedure(wPool);
+  const req = wPool.request();
+  req.input("FatFisRefNo", sql.Int, fatFisRefNo);
+  req.input("ApplyMuhMizan", sql.Bit, opts?.applyMuhMizan ? 1 : 0);
+  req.input("ApplyStkMizan", sql.Bit, opts?.applyStkMizan ? 1 : 0);
+  req.input("ApplyHarrefno", sql.Bit, opts?.applyHarrefno === false ? 0 : 1);
+  await req.execute("dbo.sp_Fatura_YanEtki_Kayit");
+  return { skipped: false };
 }
 
 function norm(s) {
@@ -1090,6 +1123,25 @@ function extractProfileFromUbl(data) {
   return String(textNode(inv.ProfileID) || textNode(inv.CustomizationID) || "").trim();
 }
 
+function extractEttnFromInvoice(data) {
+  const q = data?.qnbRaw && typeof data.qnbRaw === "object" ? data.qnbRaw : {};
+  const inv = getInvoiceNodeFromUbl(data);
+  const candidates = [
+    data?.ettn,
+    data?.ETTN,
+    q.ettn,
+    q.ETTN,
+    data?.externalId,
+    inv ? textNode(inv.UUID) : "",
+    inv ? textNode(inv.Uuid) : "",
+  ];
+  for (const c of candidates) {
+    const t = String(c || "").trim();
+    if (/^[0-9A-Fa-f-]{30,}$/.test(t)) return t;
+  }
+  return "";
+}
+
 function extractWithholdingFromUbl(data) {
   const inv = getInvoiceNodeFromUbl(data);
   if (!inv) return { tevkifatTutar: null, tevkifatOrani: null, tevkifatKodu: "" };
@@ -1173,6 +1225,49 @@ async function patchFatFisIrsaliyeAlanlari(wPool, fatFisRefNo, despatches) {
         FATFISIRSTAR = CASE WHEN @applyTar = 1 THEN @irstar ELSE FATFISIRSTAR END
       WHERE FATFISREFNO = @ref
     `);
+}
+
+/**
+ * ETA arayüzünün FATFISTOPLAM e-fatura satırları (yalnızca dolu olanlar):
+ *   401 E-FATURA(1) = belge no
+ *   402 E-FATURA(2) = ETTN
+ * KDV (101) satırına dokunulmaz. Boş şablon yuvaları yazılmaz.
+ */
+async function patchFatFisToplamEfatura(wPool, fatFisRefNo, opts) {
+  const belgeNo = String(opts?.belgeNo || "").trim();
+  const ettn = String(opts?.ettn || "").trim();
+  if (!belgeNo && !ettn) return;
+
+  const rows = [];
+  if (belgeNo) rows.push({ konu: 401, baslik: "E-FATURA(1)", acik: belgeNo.slice(0, 80) });
+  if (ettn) rows.push({ konu: 402, baslik: "E-FATURA(2)", acik: ettn.slice(0, 80) });
+  if (!rows.length) return;
+
+  const konuList = rows.map((r) => r.konu).join(",");
+  await wPool
+    .request()
+    .input("ref", sql.Int, fatFisRefNo)
+    .query(`DELETE FROM dbo.FATFISTOPLAM WHERE FFTREFNO=@ref AND FFTKONU IN (${konuList})`);
+
+  for (const r of rows) {
+    await wPool
+      .request()
+      .input("ref", sql.Int, fatFisRefNo)
+      .input("konu", sql.Int, r.konu)
+      .input("baslik", sql.VarChar(80), r.baslik)
+      .input("acik", sql.VarChar(80), r.acik)
+      .query(`
+        INSERT INTO dbo.FATFISTOPLAM (
+          FFTTAR, FFTREFNO, FFTTIPI, FFTGCFLAG, FFTKAYONC, FFTKAYNAK,
+          FFTCARKOD, FFTEVRAKNO1, FFTKONU, FFTBASLIK, FFTACIKLAMA1, FFTEFATFLAG
+        )
+        SELECT
+          F.FATFISTAR, F.FATFISREFNO, F.FATFISTIPI, F.FATFISGCFLAG, F.FATFISKAYONC, F.FATFISKAYNAK,
+          F.FATFISCARKOD, F.FATFISEVRAKNO1, @konu, @baslik, @acik, 1
+        FROM dbo.FATFIS F
+        WHERE F.FATFISREFNO = @ref
+      `);
+  }
 }
 
 async function patchCurrencyFields(wPool, fatFisRefNo, opts) {
@@ -1862,7 +1957,7 @@ async function getFatFisHeaderByEvrakNo(wPool, evrakNo) {
     .request()
     .input("evrak", sql.NVarChar(80), evrakNo)
     .query(
-      "SELECT TOP 1 FATFISREFNO, FATFISSTKREFNO FROM dbo.FATFIS WITH (NOLOCK) WHERE FATFISEVRAKNO1=@evrak ORDER BY FATFISREFNO DESC"
+      "SELECT TOP 1 FATFISREFNO, FATFISSTKREFNO, FATFISMUHREFNO FROM dbo.FATFIS WITH (NOLOCK) WHERE FATFISEVRAKNO1=@evrak ORDER BY FATFISREFNO DESC"
     );
   return rs.recordset[0] || null;
 }
@@ -2032,6 +2127,9 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   const rPool = await readPool();
   const wPool = await writePool();
   await ensureWriteProcedures(wPool);
+  // EFE konnektörünün kullandığı orijinal prosedürleri ezmemek için canlıda ayrı
+  // isimli kopyalar çağrılabilir (ETA_FATURA_PROC_SUFFIX / ETA_PROC_* env).
+  const faturaProcs = resolveFaturaProcNames();
 
   const q = afterData.qnbRaw && typeof afterData.qnbRaw === "object" ? afterData.qnbRaw : {};
   const belgeNo = String(afterData.belgeNo || q.belgeNo || "").trim();
@@ -2040,6 +2138,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   const existingHeader = await getFatFisHeaderByEvrakNo(wPool, belgeNo);
   const existingRef = existingHeader?.FATFISREFNO || null;
   const existingStokRef = existingHeader?.FATFISSTKREFNO || 0;
+  const existingMuhRef = Number(existingHeader?.FATFISMUHREFNO || 0);
   const existingLineCount = existingRef ? await getFaturaLineCount(wPool, existingRef) : 0;
   const repairMode = Boolean(existingRef) && existingLineCount === 0;
   if (existingRef && !repairMode) {
@@ -2205,6 +2304,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
 
   const connectorUser = (process.env.ETA_CONNECTOR_USER || "YMM").trim();
   const profile = String(q.faturaProfili || afterData?.faturaProfili || extractProfileFromUbl(afterData) || "TEMELFATURA").trim();
+  const ettn = extractEttnFromInvoice(afterData);
   const invoiceTypeCode = String(q.faturaTipi || cls.invType || "").trim();
   const despatchesFromSubcol = await loadDespatchesFromSubcollection(docId);
   const irsaliyeNumaralari = joinDespatchBelgeNos(despatchesFromSubcol);
@@ -2285,7 +2385,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     req.input("STKFISTOPOTUT", sql.Decimal(18, 4), stkTopOtut);
     req.output("DonusDegeri1", sql.Int);
     req.output("DonusDegeri2", sql.Int);
-    await req.execute("dbo.sp_Fatura_Kayit");
+    await req.execute(`dbo.${faturaProcs.kayit}`);
 
     fatFisRefNo = req.parameters.DonusDegeri1.value;
     stokFisRefNo = req.parameters.DonusDegeri2.value || 0;
@@ -2294,7 +2394,9 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
       fatFisRefNo = await getExistingFatFisRef(wPool, belgeNo);
     }
     if (!fatFisRefNo) {
-      throw new Error("sp_Fatura_Kayit did not return DonusDegeri1 and FATFIS row was not found.");
+      throw new Error(
+        `${faturaProcs.kayit} did not return DonusDegeri1 and FATFIS row was not found.`
+      );
     }
   }
 
@@ -2451,7 +2553,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     dr.input("SatirTevkifatOrani", sql.Decimal(18, 4), tevkifatOrani);
     dr.input("SatirTevkifatKodu", sql.NVarChar(100), tevkifatKodu);
     dr.input("SatirTevkifatTutari", sql.Decimal(18, 4), 0);
-    await dr.execute("dbo.sp_Fatura_Detay_Kayit");
+    await dr.execute(`dbo.${faturaProcs.detay}`);
 
     const skipFatharPatch = String(process.env.ETA_SKIP_FATHAR_PATCH ?? "").trim() === "1";
     if (
@@ -2515,7 +2617,11 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     lineCurrency,
   });
 
-  await wPool.request().input("FatFisRefNo", sql.Int, fatFisRefNo).execute("dbo.sp_FatFisToplam_Kayit");
+  await wPool
+    .request()
+    .input("FatFisRefNo", sql.Int, fatFisRefNo)
+    .execute(`dbo.${faturaProcs.toplam}`);
+  await patchFatFisToplamEfatura(wPool, fatFisRefNo, { belgeNo, ettn });
 
   await syncFatFisHeaderFromFathar(wPool, fatFisRefNo, {
     useUblHeader: amountModel === "ubl",
@@ -2550,6 +2656,20 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     await tryAutoMuhasebeForDeneme(wPool, fatFisRefNo, {
       refFatFisRefNo: muhasebeRefForSp,
     });
+  }
+
+  try {
+    await tryDenemeYanEtkiKayit(wPool, fatFisRefNo, {
+      applyMuhMizan: existingMuhRef <= 0,
+      applyStkMizan: !repairMode,
+      applyHarrefno: true,
+    });
+  } catch (yanEtkiErr) {
+    console.warn(
+      "syncApprovedInvoiceToEta: mizan/HARREFNO yan etki yazılamadı",
+      docId,
+      yanEtkiErr?.message || yanEtkiErr
+    );
   }
 
   const verify = await wPool
