@@ -20,6 +20,7 @@ import {
   giderMetniFromLines,
   binekHesaplarForTuru,
 } from "./aracGiderKurallari.js";
+import { buildMuhasebeFisiSnapshot } from "./etaMuhasebeFisi.js";
 
 let readPoolPromise = null;
 let writePoolPromise = null;
@@ -2556,12 +2557,28 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     .input("fatRef", sql.Int, fatFisRefNo)
     .query("SELECT TOP 1 FATFISREFNO, FATFISEVRAKNO1, FATFISMUHREFNO FROM dbo.FATFIS WITH (NOLOCK) WHERE FATFISREFNO=@fatRef");
 
+  const muhFisRefNo = verify.recordset[0]?.FATFISMUHREFNO || 0;
+
+  // Mahsup fişi anlık görüntüsü Firestore'a yazılır; ETA yerel ağda olduğu için
+  // arayüz fişi canlı okuyamaz. Okuma başarısız olsa da fatura kaydı geçerlidir.
+  let muhasebeFisi = null;
+  try {
+    muhasebeFisi = await buildMuhasebeFisiSnapshot(wPool, { muhFisRefNo, fatFisRefNo });
+  } catch (fisErr) {
+    console.warn(
+      "syncApprovedInvoiceToEta: mahsup fişi okunamadı",
+      docId,
+      fisErr?.message || fisErr
+    );
+  }
+
   return {
     status: repairMode ? "repaired" : "inserted",
     docId,
     fatFisRefNo,
     stokFisRefNo,
-    muhFisRefNo: verify.recordset[0]?.FATFISMUHREFNO || 0,
+    muhFisRefNo,
+    muhasebeFisi,
     muhasebeRefFatFisRefNo: muhasebeRefForSp || 0,
     ...(binekMuhasebe && { binekAracMuhasebe: binekMuhasebe }),
     erpCariKodu,

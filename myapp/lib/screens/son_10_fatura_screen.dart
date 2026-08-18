@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import '../formatting/display_date.dart';
 import '../services/qnb_api.dart';
 import '../widgets/ara_onay_yonlendir_dialog.dart';
+import '../widgets/muhasebe_fisi_dialog.dart';
 import 'invoice_json_review_screen.dart';
 import 'invoice_pdf_review_screen.dart';
 
@@ -213,6 +214,8 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
       'etaKayitDurumu': data['etaKayitDurumu'],
       'etaKayitHata': data['etaKayitHata'],
       'arsivDurumu': data['arsivDurumu'],
+      'etaMuhFisRefNo': data['etaMuhFisRefNo'],
+      'muhasebeFisi': data['muhasebeFisi'],
     };
   }
 
@@ -871,6 +874,19 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     }
   }
 
+  /// Muhasebe: arşive taşımadan önce faturanın ETA mahsup fişini gösterir.
+  ///
+  /// Fiş, `qnb_invoices.muhasebeFisi` alanından okunur; ETA SQL yerel ağda olduğu
+  /// için fatura kaydını yapan taraf bu alanı yazar (ağ çağrısı yapılmaz).
+  Future<void> _mahsupFisiniGoster(BuildContext context, Map<String, dynamic> it) async {
+    final raw = it['muhasebeFisi'];
+    await showMuhasebeFisiDialog(
+      context,
+      fis: raw is Map ? Map<String, dynamic>.from(raw) : null,
+      belgeNo: (it['belgeNo']?.toString() ?? '').trim(),
+    );
+  }
+
   /// Muhasebe: kaydı kontrol edilen faturayı ilgili irsaliyelerle birlikte arşive taşır.
   Future<void> _arsiveTasi(BuildContext context, Map<String, dynamic> it) async {
     final docId = (it['invoiceDocId']?.toString() ?? '').trim();
@@ -1357,24 +1373,45 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
                                             const Padding(
                                               padding: EdgeInsets.only(top: 6),
                                               child: Text(
-                                                'Fatura kaydı yapıldı; kontrol sonrası arşive taşıyın.',
+                                                'Fatura kaydı yapıldı; mahsup fişini kontrol edip arşive taşıyın.',
                                                 style: TextStyle(fontSize: 12),
                                               ),
                                             ),
                                             Align(
                                               alignment: Alignment.centerLeft,
-                                              child: FilledButton.tonalIcon(
-                                                style: FilledButton.styleFrom(
-                                                  padding: const EdgeInsets.symmetric(
-                                                      horizontal: 12, vertical: 4),
-                                                  visualDensity: VisualDensity.compact,
-                                                ),
-                                                onPressed: loading
-                                                    ? null
-                                                    : () => _arsiveTasi(context, it),
-                                                icon: const Icon(Icons.archive_outlined,
-                                                    size: 18),
-                                                label: const Text('Arşive Taşı'),
+                                              child: Wrap(
+                                                spacing: 8,
+                                                runSpacing: 6,
+                                                children: [
+                                                  OutlinedButton.icon(
+                                                    style: OutlinedButton.styleFrom(
+                                                      padding: const EdgeInsets.symmetric(
+                                                          horizontal: 12, vertical: 4),
+                                                      visualDensity: VisualDensity.compact,
+                                                    ),
+                                                    onPressed: loading
+                                                        ? null
+                                                        : () =>
+                                                            _mahsupFisiniGoster(context, it),
+                                                    icon: const Icon(
+                                                        Icons.receipt_long_outlined,
+                                                        size: 18),
+                                                    label: const Text('Mahsup Fişi'),
+                                                  ),
+                                                  FilledButton.tonalIcon(
+                                                    style: FilledButton.styleFrom(
+                                                      padding: const EdgeInsets.symmetric(
+                                                          horizontal: 12, vertical: 4),
+                                                      visualDensity: VisualDensity.compact,
+                                                    ),
+                                                    onPressed: loading
+                                                        ? null
+                                                        : () => _arsiveTasi(context, it),
+                                                    icon: const Icon(Icons.archive_outlined,
+                                                        size: 18),
+                                                    label: const Text('Arşive Taşı'),
+                                                  ),
+                                                ],
                                               ),
                                             ),
                                           ],

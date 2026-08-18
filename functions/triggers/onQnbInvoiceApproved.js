@@ -132,6 +132,8 @@ export const onQnbInvoiceApproved = onDocumentUpdated(
           etaFatFisRefNo: result.fatFisRefNo || null,
           etaStokFisRefNo: result.stokFisRefNo || null,
           etaMuhFisRefNo: result.muhFisRefNo || null,
+          // Muhasebe arşive taşımadan önce mahsup fişini bu alandan görür.
+          muhasebeFisi: result.muhasebeFisi || null,
           etaKayitDetay: {
             status: result.status || "ok",
             lineCount: result.lineCount || 0,
