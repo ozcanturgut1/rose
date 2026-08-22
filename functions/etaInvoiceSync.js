@@ -97,11 +97,50 @@ async function ensureDenemeMuhasebeProcedure(pool) {
   validatedDenemeMuhasebeProcedure = true;
 }
 
+function envFlag(name) {
+  const raw = process.env[name];
+  if (raw == null) return undefined;
+  const v = String(raw).trim();
+  return v === "" ? undefined : v;
+}
+
+function isFlagOff(value) {
+  return ["0", "false", "no", "off"].includes(String(value).toLowerCase());
+}
+
+function isDenemeWriteDb() {
+  return String(resolveSqlTargets().writeDb || "").trim().toLowerCase() === "eta_deneme_2026";
+}
+
+/**
+ * Otomatik muhasebe fişi (normal + binek araç) açık mı?
+ *
+ * Kapı DB adına değil env bayrağına bağlı: canlıya geçerken `DB_WRITE_NAME`
+ * değiştiğinde akış sessizce devre dışı kalmasın, bilinçli olarak açılsın.
+ * Bayrak verilmezse eski davranış korunur (yalnızca deneme write DB).
+ * `ETA_DENEME_AUTO_MUHASEBE=0` geriye dönük kapatma anahtarı olarak her
+ * durumda kapatır.
+ */
+function autoMuhasebeEnabled() {
+  const legacy = envFlag("ETA_DENEME_AUTO_MUHASEBE");
+  if (legacy !== undefined && isFlagOff(legacy)) return false;
+  const flag = envFlag("ETA_ENABLE_AUTO_MUHASEBE");
+  if (flag !== undefined) return !isFlagOff(flag);
+  return isDenemeWriteDb();
+}
+
+/**
+ * MUHMIZDEGER / STKMIZDEGER / HARREFNO yan etkileri açık mı?
+ * `ETA_ENABLE_YAN_ETKI` verilmezse eski davranış (yalnızca deneme write DB).
+ */
+function yanEtkiEnabled() {
+  const flag = envFlag("ETA_ENABLE_YAN_ETKI");
+  if (flag !== undefined) return !isFlagOff(flag);
+  return isDenemeWriteDb();
+}
+
 async function tryAutoMuhasebeForDeneme(wPool, fatFisRefNo, opts) {
-  const writeDb = String(resolveSqlTargets().writeDb || "").trim().toLowerCase();
-  const isDeneme = writeDb === "eta_deneme_2026";
-  const enabled = String(process.env.ETA_DENEME_AUTO_MUHASEBE ?? "1").trim() !== "0";
-  if (!isDeneme || !enabled) return;
+  if (!autoMuhasebeEnabled()) return;
   await ensureDenemeMuhasebeProcedure(wPool);
   const req = wPool.request();
   req.input("FatFisRefNo", sql.Int, fatFisRefNo);
@@ -133,14 +172,11 @@ async function ensureBinekAracProcedure(wPool) {
 /**
  * Binek araç gideri muhasebe fişini binek prosedürüyle oluşturur.
  * Tüm gider türleri işlenir: KIRA (aylık limit), diğerleri (%70/%30 + indirilemeyen
- * KDV). Yalnızca deneme write DB'de çalışır.
+ * KDV). Yalnızca otomatik muhasebe bayrağı açıkken çalışır (autoMuhasebeEnabled).
  * Dönüş: { skipped: bool, reason?, giderTuru, ... }
  */
 async function tryBinekAracMuhasebe(wPool, fatFisRefNo, opts) {
-  const writeDb = String(resolveSqlTargets().writeDb || "").trim().toLowerCase();
-  const isDeneme = writeDb === "eta_deneme_2026";
-  const enabled = String(process.env.ETA_DENEME_AUTO_MUHASEBE ?? "1").trim() !== "0";
-  if (!isDeneme || !enabled) return { skipped: true, reason: "muhasebe_disabled" };
+  if (!autoMuhasebeEnabled()) return { skipped: true, reason: "muhasebe_disabled" };
 
   const giderTuru = String(opts?.giderTuru || "DIGER").toUpperCase();
   const rules = opts?.rules || {};
@@ -182,13 +218,12 @@ async function ensureDenemeYanEtkiProcedure(pool) {
 
 /**
  * ETA arayüzünün yazdığı MUHMIZDEGER / STKMIZDEGER / HARREFNO yan etkileri.
- * Yalnızca deneme write DB. Mizan adımları tekrar çalışırsa bakiyeyi ikiye katlar;
- * çağıran taraf apply* bayraklarıyla tek sefer güvencesi verir.
+ * Yalnızca yan etki bayrağı açıkken çalışır (yanEtkiEnabled). Mizan adımları tekrar
+ * çalışırsa bakiyeyi ikiye katlar; çağıran taraf apply* bayraklarıyla tek sefer
+ * güvencesi verir.
  */
 async function tryDenemeYanEtkiKayit(wPool, fatFisRefNo, opts) {
-  const writeDb = String(resolveSqlTargets().writeDb || "").trim().toLowerCase();
-  const isDeneme = writeDb === "eta_deneme_2026";
-  if (!isDeneme) return { skipped: true, reason: "not_deneme" };
+  if (!yanEtkiEnabled()) return { skipped: true, reason: "yan_etki_disabled" };
   await ensureDenemeYanEtkiProcedure(wPool);
   const req = wPool.request();
   req.input("FatFisRefNo", sql.Int, fatFisRefNo);
