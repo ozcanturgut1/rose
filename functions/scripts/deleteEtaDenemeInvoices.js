@@ -16,6 +16,7 @@
  *   - Tek transaction; herhangi bir adım hata verirse rollback.
  *   - `--apply` parametresi verilmedikçe sadece sayım yapar (dry-run gibi davranır), DELETE çalıştırmaz.
  *   - `--confirm-write-db=<dbAdi>` parametresi `DB_WRITE_NAME` ile birebir eşleşmeli; aksi halde durur.
+ *   - Hedef DB adı `ETA_DENEME_*` değilse script hiç çalışmaz (canlıda kullanılamaz).
  *   - CARKART / STKKART bakiyelerine dokunmaz. Firestore'a dokunmaz.
  *
  * Gerekli env: functions/.env (DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_WRITE_NAME)
@@ -174,9 +175,24 @@ function printCounts(label, c) {
   console.log(`  TOPLAM                    = ${fmt(c.toplam)}`);
 }
 
+/**
+ * `--confirm-write-db` yalnızca DB_WRITE_NAME ile eşleşmeyi doğrular; DB_WRITE_NAME
+ * canlıya çevrildiğinde koruma kalmaz. Bu script tüm faturaları sildiği için hedefin
+ * deneme veritabanı olduğu ayrıca ve kesin olarak doğrulanır.
+ */
+function assertDenemeDb(dbName) {
+  if (!/^ETA_DENEME_/i.test(String(dbName).trim())) {
+    throw new Error(
+      `Güvenlik: bu script yalnızca ETA_DENEME_* veritabanlarında çalışır. ` +
+        `Hedef '${dbName}' kabul edilmiyor.`
+    );
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv);
   const t = resolveSqlTargets();
+  assertDenemeDb(t.writeDb);
 
   console.log("=".repeat(72));
   console.log(`SİL: ${t.writeDb} üzerinde fatura + ilgili tüm bağlantılı kayıt silme`);

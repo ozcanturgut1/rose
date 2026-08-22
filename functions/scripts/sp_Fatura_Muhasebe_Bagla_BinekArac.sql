@@ -26,6 +26,7 @@ BEGIN
     @MaxMuhRef INT,
     @NextHar INT,
     @MuhFisNo VARCHAR(40),
+    @NextFisNoInt INT,
     @Sira INT = 0;
 
   SELECT
@@ -144,7 +145,15 @@ BEGIN
     UPDATE dbo.HARREFNO SET HARREFDEGER = @MuhFisRefNo WHERE HARREFMODUL = 4 AND HARREFKONU = 1;
   END;
 
-  SET @MuhFisNo = 'MA-' + CAST(@MuhFisRefNo + 530287 AS VARCHAR(20));
+  -- Fiş no, sabit ofsetle değil mevcut MA- dizisinin devamı olarak üretilir:
+  -- ofset veritabanına göre değişiyor (canlıda 530292, denemede 530287) ve
+  -- sabit kullanıldığında mevcut fiş numaralarıyla çakışıyor.
+  SET @NextFisNoInt = ISNULL((
+    SELECT MAX(TRY_CAST(SUBSTRING(MUHFISNO, 4, 20) AS INT))
+    FROM dbo.MUHFIS WITH (UPDLOCK, HOLDLOCK)
+    WHERE MUHFISNO LIKE 'MA-%'
+  ), @MuhFisRefNo + 530286) + 1;
+  SET @MuhFisNo = 'MA-' + CAST(@NextFisNoInt AS VARCHAR(20));
 
   INSERT INTO dbo.MUHFIS (
     MUHFISTAR, MUHFISNO, MUHFISCINSI, MUHFISYEVNO, MUHFISREFNO, MUHFISKAYITONC,

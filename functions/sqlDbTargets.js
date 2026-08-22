@@ -22,8 +22,15 @@ export function resolveSqlTargets() {
   if (!readDb || !writeDb) {
     throw new Error("Missing DB_READ_NAME or DB_WRITE_NAME.");
   }
-  if (readDb.toLowerCase() === writeDb.toLowerCase()) {
-    throw new Error("DB_READ_NAME and DB_WRITE_NAME must be different.");
+  // Deneme kurulumunda okuma (canlı referans) ve yazma (deneme) DB'leri farklıdır ve
+  // yanlışlıkla aynı verilmesi kazara canlıya yazmak demektir. Production'da ise tek
+  // canlı DB doğru topoloji; bu yüzden eşitliğe yalnızca açık onayla izin verilir.
+  const allowSameDb = pickEnv("ETA_ALLOW_SAME_DB") === "1";
+  if (readDb.toLowerCase() === writeDb.toLowerCase() && !allowSameDb) {
+    throw new Error(
+      "DB_READ_NAME and DB_WRITE_NAME must be different. " +
+        "Tek canlı DB kullanılacaksa ETA_ALLOW_SAME_DB=1 verin."
+    );
   }
 
   return {

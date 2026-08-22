@@ -11,7 +11,7 @@
  *   - Cari = ödenecek = mal + indirilecek KDV (FATFISGENTOPLAM)
  *   - İndirilecek KDV → 191 108 borç (toplam KDV − sorumlu)
  *   - Sorumlu KDV → 191 109 borç + 360 alacak (fiş dengesi; üretim şablonu)
- *   - MUHFISKAYITONC = 4, MUHFISNO = MA-{ref+530287}, MUHFISMATATEFLAG = 1 (arayüz listesi), SIRKETLOG (modul 4)
+ *   - MUHFISKAYITONC = 4, MUHFISNO = mevcut MA- dizisinin devamı, MUHFISMATATEFLAG = 1 (arayüz listesi), SIRKETLOG (modul 4)
  *
  * Güvenlik: default DRY-RUN.
  *
