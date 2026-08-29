@@ -1,15 +1,66 @@
 import "dotenv/config";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { ensureAdmin } from "../adminInit.js";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { syncApprovedInvoiceToEta } from "../etaInvoiceSync.js";
 import { formatEtaError } from "../etaError.js";
 import { evaluateAracPlakaKapisi } from "../plakaTespit.js";
 
+const WORKER_ID = `${os.hostname()}:${process.pid}`;
+// Kilit süresi: bunu aşan 'isleniyor' kayıtları çökmüş bir worker'dan kalmış
+// sayılır ve devralınır. Çok kısa verilmesi yavaş bir faturayı iki kez işletebilir.
+const CLAIM_LOCK_MS = Number(process.env.ETA_LOCAL_CLAIM_LOCK_SEC || "900") * 1000;
+
 function normalizeStatus(value) {
   return String(value || "")
     .trim()
     .toLowerCase()
     .replaceAll("ı", "i");
+}
+
+/**
+ * Faturayı bu worker adına atomik olarak sahiplenir.
+ *
+ * Aynı faturanın iki worker sürecinde birden işlenmesini engeller: durum kontrolü
+ * ve 'isleniyor' yazımı tek transaction içinde yapılır. Kilidi dolmuş kayıtlar
+ * (çökmüş worker) devralınır; ETA tarafındaki belge numarası kontrolü
+ * (already_exists) ikinci bir güvenlik katmanıdır.
+ */
+export async function claimInvoice(db, ref, now) {
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) return { claimed: false, reason: "not_found" };
+    const d = snap.data() || {};
+    if (normalizeStatus(d.onayDurumu) !== "onaylandi") {
+      return { claimed: false, reason: "not_approved" };
+    }
+    const eta = normalizeStatus(d.etaKayitDurumu);
+    if (eta === "tamamlandi") return { claimed: false, reason: "already_done" };
+    if (eta === "beklemede_plaka") return { claimed: false, reason: "plaka_blokajli" };
+
+    const kilitBitisMs =
+      typeof d.etaIslemKilitBitisMs === "number" ? d.etaIslemKilitBitisMs : 0;
+    if (eta === "isleniyor" && kilitBitisMs > now) {
+      return { claimed: false, reason: "baska_isleyicide", isleyen: d.etaIsleyen || null };
+    }
+
+    tx.set(
+      ref,
+      {
+        etaKayitDurumu: "isleniyor",
+        etaIsleyen: WORKER_ID,
+        etaIslemBaslangic: FieldValue.serverTimestamp(),
+        etaIslemKilitBitisMs: now + CLAIM_LOCK_MS,
+        etaKayitGuncellemeTarihi: FieldValue.serverTimestamp(),
+        etaKayitHata: FieldValue.delete(),
+      },
+      { merge: true }
+    );
+
+    return { claimed: true, devralindi: eta === "isleniyor" };
+  });
 }
 
 async function processDoc(db, docSnap) {
@@ -47,6 +98,7 @@ async function processDoc(db, docSnap) {
       {
         etaKayitDurumu: "beklemede_plaka",
         etaKayitGuncellemeTarihi: FieldValue.serverTimestamp(),
+        etaIslemKilitBitisMs: 0,
         etaKayitHata: plakaKapisi.mesaj,
       },
       { merge: true }
@@ -54,14 +106,16 @@ async function processDoc(db, docSnap) {
     return { skipped: false, blocked: true, reason: `plaka_${plakaKapisi.durum}` };
   }
 
-  await ref.set(
-    {
-      etaKayitDurumu: "isleniyor",
-      etaKayitGuncellemeTarihi: FieldValue.serverTimestamp(),
-      etaKayitHata: FieldValue.delete(),
-    },
-    { merge: true }
-  );
+  const claim = await claimInvoice(db, ref, Date.now());
+  if (!claim.claimed) {
+    if (claim.reason === "baska_isleyicide") {
+      console.log(`[SKIP] ${docId}: baska isleyicide (${claim.isleyen || "bilinmiyor"})`);
+    }
+    return { skipped: true, reason: claim.reason };
+  }
+  if (claim.devralindi) {
+    console.warn(`[WARN] ${docId}: kilidi dolmus 'isleniyor' kaydi devralindi`);
+  }
 
   try {
     const result = await syncApprovedInvoiceToEta(data, docId);
@@ -70,6 +124,9 @@ async function processDoc(db, docSnap) {
         {
           etaKayitDurumu: "beklemede_kurfarki",
           etaKayitGuncellemeTarihi: FieldValue.serverTimestamp(),
+          // Kilit serbest bırakılır: bu karar her turda SQL'den yeniden hesaplanıyor,
+          // sorun giderildiğinde bir sonraki tur kaydı tamamlayabilmeli.
+          etaIslemKilitBitisMs: 0,
           etaKayitHata: result.blockMessage || "Kur farkı faturası: cari belirlenemedi.",
           etaKayitDetay: {
             status: result.status || "blocked_kurfarki",
@@ -85,6 +142,7 @@ async function processDoc(db, docSnap) {
       {
         etaKayitDurumu: "tamamlandi",
         etaKayitGuncellemeTarihi: FieldValue.serverTimestamp(),
+        etaIslemKilitBitisMs: 0,
         etaFatFisRefNo: result.fatFisRefNo || null,
         etaStokFisRefNo: result.stokFisRefNo || null,
         etaMuhFisRefNo: result.muhFisRefNo || null,
@@ -112,6 +170,9 @@ async function processDoc(db, docSnap) {
       {
         etaKayitDurumu: "hata",
         etaKayitGuncellemeTarihi: FieldValue.serverTimestamp(),
+        // Kilit serbest bırakılır: hatalı kayıt bir sonraki turda yeniden denenir
+        // (bugünkü davranış). Aksi halde kilit süresi boyunca beklerdi.
+        etaIslemKilitBitisMs: 0,
         etaKayitHata: msg,
       },
       { merge: true }
@@ -184,8 +245,22 @@ async function main() {
   await runBatch(limitPerStatus);
 }
 
-main().catch((err) => {
-  console.error("localEtaWorker failed:", err?.message || err);
-  process.exitCode = 1;
-});
+// Modül yüklenirken worker başlamamalı: import edilmesi bile faturaları işlemeye
+// başlardı. Diğer script'lerle aynı koruma.
+const isRunDirectly = (() => {
+  const a1 = process.argv[1];
+  if (!a1) return false;
+  try {
+    return path.resolve(fileURLToPath(import.meta.url)) === path.resolve(a1);
+  } catch {
+    return false;
+  }
+})();
+
+if (isRunDirectly) {
+  main().catch((err) => {
+    console.error("localEtaWorker failed:", err?.message || err);
+    process.exitCode = 1;
+  });
+}
 
