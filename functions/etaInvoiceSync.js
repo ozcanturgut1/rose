@@ -2420,18 +2420,32 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     req.input("STKFISTOPOTUT", sql.Decimal(18, 4), stkTopOtut);
     req.output("DonusDegeri1", sql.Int);
     req.output("DonusDegeri2", sql.Int);
-    await req.execute(`dbo.${faturaProcs.kayit}`);
+    // Çıkış parametreleri `result.output` üzerinden okunmalı. `req.parameters[...].value`
+    // girdi olarak verilen değeri tutar ve output parametrelerinde null kalır; bu yüzden
+    // stok fiş refno'su sessizce 0 kalıyordu ve stok hareketleri STKHARREFNO=0 ile
+    // sahipsiz yazılıyordu (stok mizanı da hiç güncellenmiyordu).
+    const out = (await req.execute(`dbo.${faturaProcs.kayit}`)).output || {};
 
-    fatFisRefNo = req.parameters.DonusDegeri1.value;
-    stokFisRefNo = req.parameters.DonusDegeri2.value || 0;
+    fatFisRefNo = out.DonusDegeri1 || null;
+    stokFisRefNo = out.DonusDegeri2 || 0;
     if (!fatFisRefNo) {
-      // Some DB variants do not reliably set output params; fallback by invoice no.
       fatFisRefNo = await getExistingFatFisRef(wPool, belgeNo);
     }
     if (!fatFisRefNo) {
       throw new Error(
         `${faturaProcs.kayit} did not return DonusDegeri1 and FATFIS row was not found.`
       );
+    }
+    if (!stokFisRefNo) {
+      // Prosedür aynı değeri FATFIS'e de yazıyor; çıkış parametresi gelmezse
+      // buradan okumak stok satırlarının sahipsiz kalmasını önler.
+      const stkRs = await wPool
+        .request()
+        .input("fatRef", sql.Int, fatFisRefNo)
+        .query(
+          "SELECT TOP 1 ISNULL(FATFISSTKREFNO, 0) AS stkRef FROM dbo.FATFIS WITH (NOLOCK) WHERE FATFISREFNO = @fatRef"
+        );
+      stokFisRefNo = Number(stkRs.recordset[0]?.stkRef || 0);
     }
   }
 
