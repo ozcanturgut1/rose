@@ -10,6 +10,8 @@
     "logs": "firebase functions:log",
     "eta:local-sync": "node scripts/localEtaSync.js",
     "eta:local-worker": "node scripts/localEtaWorker.js",
+    "eta:local-worker:watch": "node scripts/localEtaWorker.js watch",
+    "eta:worker-state": "node scripts/showEtaWorkerState.js",
     "eta:list-ubl-lines": "node scripts/listUblLinesLastSqlInvoices.js",
     "eta:list-firebase-stok-cinsi": "node scripts/listFirebaseStokCinsiLast10Invoices.js",
     "eta:dry-run-delete-invoices": "node scripts/dryRunDeleteEtaDenemeInvoices.js",

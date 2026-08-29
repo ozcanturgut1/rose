@@ -1,3 +1,25 @@
+/**
+ * Onaylanmış faturaları ETA'ya kaydeden şirket içi worker.
+ *
+ *   node scripts/localEtaWorker.js          -> tek parti işleyip çıkar
+ *   node scripts/localEtaWorker.js watch    -> sürekli çalışır (servis modu)
+ *
+ * Watch modunda `qnb_sync_state/eta_local_worker` dokümanına kalp atışı yazar;
+ * durumu `node scripts/showEtaWorkerState.js` ile görebilirsiniz. Bu doküman
+ * worker'ın ayakta olup olmadığını anlamanın tek yolu: arayüz kuyrukta bekleyen
+ * faturaları göstermiyor, dolayısıyla worker sessizce durursa fark edilmez.
+ *
+ * Windows'ta servis olarak çalıştırma (elle başlatmaya güvenilmemeli):
+ *   Görev Zamanlayıcı ile: tetikleyici "bilgisayar başlatıldığında", eylem
+ *   `node.exe scripts/localEtaWorker.js watch`, başlangıç dizini `functions`,
+ *   ayarlar sekmesinde "görev başarısız olursa her 1 dakikada bir yeniden başlat".
+ *   Alternatif olarak NSSM ile gerçek bir Windows servisi kurulabilir.
+ *   Her iki durumda da GOOGLE_APPLICATION_CREDENTIALS ve functions/.env
+ *   değerlerinin o kullanıcı hesabında görünür olduğundan emin olun.
+ *
+ * SIGINT/SIGTERM alındığında worker mevcut partiyi bitirip durur; ikinci sinyal
+ * zorla çıkartır.
+ */
 import "dotenv/config";
 import os from "node:os";
 import path from "node:path";
@@ -12,12 +34,30 @@ const WORKER_ID = `${os.hostname()}:${process.pid}`;
 // Kilit süresi: bunu aşan 'isleniyor' kayıtları çökmüş bir worker'dan kalmış
 // sayılır ve devralınır. Çok kısa verilmesi yavaş bir faturayı iki kez işletebilir.
 const CLAIM_LOCK_MS = Number(process.env.ETA_LOCAL_CLAIM_LOCK_SEC || "900") * 1000;
+// Kalp atışı dokümanı; autoSupplierInvoicePipeline'ın qnb_sync_state/auto_pipeline
+// kalıbıyla aynı yerde durur.
+export const HEARTBEAT_DOC_PATH = ["qnb_sync_state", "eta_local_worker"];
 
 function normalizeStatus(value) {
   return String(value || "")
     .trim()
     .toLowerCase()
     .replaceAll("ı", "i");
+}
+
+/**
+ * Kalp atışı yazar. Yazım başarısız olursa yalnızca uyarır: izleme kaydı
+ * yüzünden fatura işleme durmamalı.
+ */
+async function writeHeartbeat(db, fields) {
+  try {
+    await db
+      .collection(HEARTBEAT_DOC_PATH[0])
+      .doc(HEARTBEAT_DOC_PATH[1])
+      .set({ ...fields, lastSeenAt: FieldValue.serverTimestamp() }, { merge: true });
+  } catch (err) {
+    console.warn(`[WARN] kalp atisi yazilamadi: ${err?.message || err}`);
+  }
 }
 
 /**
@@ -184,6 +224,7 @@ async function processDoc(db, docSnap) {
 async function runBatch(limitPerStatus) {
   ensureAdmin();
   const db = getFirestore();
+  const basladi = Date.now();
 
   const statuses = ["onaylandı", "onaylandi"];
   const docs = new Map();
@@ -218,30 +259,106 @@ async function runBatch(limitPerStatus) {
       console.log(`[OK] ${d.id}: ${JSON.stringify(r.result)}`);
     }
   }
+  const ozet = {
+    total: docs.size,
+    ok,
+    blocked,
+    error: err,
+    skipped,
+    elapsedMs: Date.now() - basladi,
+  };
   console.log(
-    `Batch done. total=${docs.size} ok=${ok} blocked=${blocked} error=${err} skipped=${skipped}`
+    `Batch done. total=${ozet.total} ok=${ok} blocked=${blocked} error=${err} skipped=${skipped}`
   );
+  return ozet;
 }
 
-async function main() {
+// Düzenli duruş: sinyal geldiğinde mevcut parti bitirilir, sonra çıkılır.
+// Faturanın ortasında kesilmek yarım kalmış bir ETA kaydı bırakabilirdi.
+let durdurmaSinyali = null;
+
+function registerShutdown() {
+  for (const sinyal of ["SIGINT", "SIGTERM"]) {
+    process.on(sinyal, () => {
+      if (durdurmaSinyali) {
+        console.log(`\n${sinyal} tekrar alindi, zorla cikiliyor.`);
+        process.exit(1);
+      }
+      durdurmaSinyali = sinyal;
+      console.log(
+        `\n${sinyal} alindi: mevcut parti bitince durulacak. Zorlamak icin tekrar gonderin.`
+      );
+    });
+  }
+}
+
+// Bekleme sırasında sinyal gelirse turu boşuna beklemeyelim.
+async function bekle(totalMs) {
+  const adimMs = 500;
+  let gecen = 0;
+  while (gecen < totalMs && !durdurmaSinyali) {
+    await new Promise((r) => setTimeout(r, Math.min(adimMs, totalMs - gecen)));
+    gecen += adimMs;
+  }
+}
+
+export async function main() {
   const mode = (process.argv[2] || "once").trim().toLowerCase();
   const limitPerStatus = Number(process.env.ETA_LOCAL_BATCH_LIMIT || "25");
   const intervalSec = Number(process.env.ETA_LOCAL_POLL_SEC || "20");
 
   if (mode === "watch") {
+    ensureAdmin();
+    const db = getFirestore();
+    registerShutdown();
     console.log(
-      `ETA local worker watch mode. poll=${intervalSec}s, limitPerStatus=${limitPerStatus}`
+      `ETA local worker watch mode. poll=${intervalSec}s, limitPerStatus=${limitPerStatus}, worker=${WORKER_ID}`
     );
-    while (true) {
+    await writeHeartbeat(db, {
+      workerId: WORKER_ID,
+      hostname: os.hostname(),
+      pid: process.pid,
+      mode: "watch",
+      status: "calisiyor",
+      startedAt: FieldValue.serverTimestamp(),
+      pollSec: intervalSec,
+      batchLimit: limitPerStatus,
+      claimLockSec: CLAIM_LOCK_MS / 1000,
+      lastError: null,
+    });
+
+    while (!durdurmaSinyali) {
       try {
-        await runBatch(limitPerStatus);
+        const ozet = await runBatch(limitPerStatus);
+        await writeHeartbeat(db, {
+          status: "calisiyor",
+          lastBatchAt: FieldValue.serverTimestamp(),
+          lastSummary: ozet,
+          lastError: null,
+        });
       } catch (err) {
-        console.error("Batch failed:", err?.message || err);
+        const msg = err?.message || String(err);
+        console.error("Batch failed:", msg);
+        await writeHeartbeat(db, {
+          status: "calisiyor",
+          lastError: msg,
+          lastErrorAt: FieldValue.serverTimestamp(),
+        });
       }
-      await new Promise((r) => setTimeout(r, intervalSec * 1000));
+      await bekle(intervalSec * 1000);
     }
+
+    await writeHeartbeat(db, {
+      status: "durdu",
+      stoppedAt: FieldValue.serverTimestamp(),
+      stopSignal: durdurmaSinyali,
+    });
+    console.log("Worker durdu.");
+    return;
   }
 
+  // Tek seferlik koşum kalp atışı yazmaz: elle çalıştırılan bir parti,
+  // servis olarak koşan worker'ın durum kaydını ezmemeli.
   await runBatch(limitPerStatus);
 }
 
