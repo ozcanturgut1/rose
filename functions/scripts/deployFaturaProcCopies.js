@@ -36,6 +36,7 @@ import { BASE_FATURA_PROCS } from "../etaFaturaProcNames.js";
 import { transformMaxToIsnullMax } from "./patchEtaDenemeProceduresNullSafe.js";
 import { transformSpFaturaKayitCariBakiyeAllTypes } from "./patchSpFaturaKayitCariBakiyeAllTypes.js";
 import { transformSpFaturaDetayKayitStokAllTypes } from "./patchSpFaturaDetayKayitStokAllTypes.js";
+import { transformSpFaturaDetayKayitNetFiyat } from "./patchSpFaturaDetayKayitNetFiyat.js";
 
 const SOURCE_PROCS = [BASE_FATURA_PROCS.kayit, BASE_FATURA_PROCS.detay, BASE_FATURA_PROCS.toplam];
 
@@ -118,6 +119,12 @@ function applyPatches(procName, def) {
     const r = transformSpFaturaDetayKayitStokAllTypes(out);
     out = r.result;
     notes.push(`stok-tüm-tipler: ${r.replaced ? "uygulandı" : "gerek yok/zaten var"}`);
+
+    const nf = transformSpFaturaDetayKayitNetFiyat(out);
+    out = nf.result;
+    notes.push(
+      `stok-birim-net-fiyat: ${nf.replaced ? "uygulandı" : `uygulanmadı (${nf.reason})`}`
+    );
   }
 
   const ns = transformMaxToIsnullMax(out);
