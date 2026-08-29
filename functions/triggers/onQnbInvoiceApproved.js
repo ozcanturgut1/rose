@@ -18,7 +18,11 @@ export const onQnbInvoiceApproved = onDocumentUpdated(
   {
     document: "qnb_invoices/{docId}",
     region: "europe-west1",
-    memory: "256MiB",
+    // ETA kayıt zinciri onlarca SQL gidiş-dönüşü yapıyor; varsayılan 60 sn'lik sınır
+    // zincirin ortasında kesilmeye yol açabilir (yarım kalmış fatura/muhasebe kaydı).
+    // 540 sn, olay tetiklemeli fonksiyonlar için izin verilen üst sınırdır.
+    timeoutSeconds: 540,
+    memory: "512MiB",
   },
   async (event) => {
     // Local worker mode: skip cloud-side SQL sync to avoid duplicate writes.
