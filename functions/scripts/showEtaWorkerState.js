@@ -69,7 +69,7 @@ async function main() {
 
   const sum = d.lastSummary || {};
   console.log("\nlastSummary:");
-  console.log(`  total=${sum.total ?? "-"} ok=${sum.ok ?? "-"} blocked=${sum.blocked ?? "-"} error=${sum.error ?? "-"} skipped=${sum.skipped ?? "-"}`);
+  console.log(`  scanned=${sum.scanned ?? "-"} total=${sum.total ?? "-"} ok=${sum.ok ?? "-"} blocked=${sum.blocked ?? "-"} error=${sum.error ?? "-"} skipped=${sum.skipped ?? "-"}`);
   console.log(`  elapsedMs        = ${sum.elapsedMs ?? "-"}`);
 
   if (d.lastError) {

@@ -19,6 +19,12 @@
  *
  * SIGINT/SIGTERM alındığında worker mevcut partiyi bitirip durur; ikinci sinyal
  * zorla çıkartır.
+ *
+ * Ortam değişkenleri:
+ *   ETA_LOCAL_POLL_SEC        watch modunda turlar arası bekleme (20)
+ *   ETA_LOCAL_BATCH_LIMIT     bir partide en fazla kaç fatura işlenir (25)
+ *   ETA_LOCAL_CLAIM_LOCK_SEC  'isleniyor' kilidinin ömrü (900)
+ *   ETA_LOCAL_MAX_SCAN        bir partide en fazla kaç doküman taranır (2000)
  */
 import "dotenv/config";
 import os from "node:os";
@@ -221,22 +227,65 @@ async function processDoc(db, docSnap) {
   }
 }
 
-async function runBatch(limitPerStatus) {
+// Toplama sırasında elenen durumlar: bunlar processDoc'un da baştan atladığı,
+// yeniden denemekle değişmeyecek durumlar.
+const ISLENMEYECEK_DURUMLAR = new Set(["tamamlandi", "beklemede_plaka"]);
+
+/**
+ * İşlenmeyi bekleyen onaylı faturaları toplar.
+ *
+ * Sorgu `etaKayitDurumu` üzerinden daraltılamıyor: alan yalnızca onaydan sonra
+ * yazıldığı için hiç işlenmemiş faturada mevcut değil ve Firestore'da alanı
+ * olmayan doküman o alana konan hiçbir filtreye girmez — yani tam da işlenmesi
+ * gereken faturalar elenirdi. Bunun yerine imleçle sayfalayıp bellekte eliyoruz;
+ * böylece sabit bir pencere yüzünden yeni fatura gözden kaçmıyor.
+ */
+export async function collectPendingDocs(col, limit, sayfaBoyutu = 200) {
+  const statuses = ["onaylandı", "onaylandi"];
+  const maxTarama = Number(process.env.ETA_LOCAL_MAX_SCAN || "2000");
+  const docs = new Map();
+  let scanned = 0;
+  let taramaSiniriAsildi = false;
+
+  for (const s of statuses) {
+    let cursor = null;
+    while (docs.size < limit && scanned < maxTarama) {
+      let q = col
+        .where("type", "==", "invoice")
+        .where("onayDurumu", "==", s)
+        .limit(sayfaBoyutu);
+      if (cursor) q = q.startAfter(cursor);
+      const snap = await q.get();
+      if (snap.empty) break;
+      scanned += snap.size;
+      for (const d of snap.docs) {
+        if (ISLENMEYECEK_DURUMLAR.has(normalizeStatus(d.data()?.etaKayitDurumu))) continue;
+        docs.set(d.id, d);
+        if (docs.size >= limit) break;
+      }
+      if (snap.size < sayfaBoyutu) break;
+      cursor = snap.docs[snap.docs.length - 1];
+    }
+    if (scanned >= maxTarama) taramaSiniriAsildi = true;
+  }
+
+  if (taramaSiniriAsildi) {
+    console.warn(
+      `[WARN] tarama siniri asildi (${maxTarama}): onayli-arsivlenmemis fatura birikmis olabilir, arsivlemeyi kontrol edin.`
+    );
+  }
+  return { docs, scanned, taramaSiniriAsildi };
+}
+
+async function runBatch(batchLimit) {
   ensureAdmin();
   const db = getFirestore();
   const basladi = Date.now();
 
-  const statuses = ["onaylandı", "onaylandi"];
-  const docs = new Map();
-  for (const s of statuses) {
-    const snap = await db
-      .collection("qnb_invoices")
-      .where("type", "==", "invoice")
-      .where("onayDurumu", "==", s)
-      .limit(limitPerStatus * 3)
-      .get();
-    for (const d of snap.docs) docs.set(d.id, d);
-  }
+  const { docs, scanned } = await collectPendingDocs(
+    db.collection("qnb_invoices"),
+    batchLimit
+  );
 
   let ok = 0;
   let err = 0;
@@ -261,6 +310,7 @@ async function runBatch(limitPerStatus) {
   }
   const ozet = {
     total: docs.size,
+    scanned,
     ok,
     blocked,
     error: err,
@@ -268,7 +318,7 @@ async function runBatch(limitPerStatus) {
     elapsedMs: Date.now() - basladi,
   };
   console.log(
-    `Batch done. total=${ozet.total} ok=${ok} blocked=${blocked} error=${err} skipped=${skipped}`
+    `Batch done. scanned=${scanned} total=${ozet.total} ok=${ok} blocked=${blocked} error=${err} skipped=${skipped}`
   );
   return ozet;
 }
@@ -304,7 +354,7 @@ async function bekle(totalMs) {
 
 export async function main() {
   const mode = (process.argv[2] || "once").trim().toLowerCase();
-  const limitPerStatus = Number(process.env.ETA_LOCAL_BATCH_LIMIT || "25");
+  const batchLimit = Number(process.env.ETA_LOCAL_BATCH_LIMIT || "25");
   const intervalSec = Number(process.env.ETA_LOCAL_POLL_SEC || "20");
 
   if (mode === "watch") {
@@ -312,7 +362,7 @@ export async function main() {
     const db = getFirestore();
     registerShutdown();
     console.log(
-      `ETA local worker watch mode. poll=${intervalSec}s, limitPerStatus=${limitPerStatus}, worker=${WORKER_ID}`
+      `ETA local worker watch mode. poll=${intervalSec}s, batchLimit=${batchLimit}, worker=${WORKER_ID}`
     );
     await writeHeartbeat(db, {
       workerId: WORKER_ID,
@@ -322,14 +372,14 @@ export async function main() {
       status: "calisiyor",
       startedAt: FieldValue.serverTimestamp(),
       pollSec: intervalSec,
-      batchLimit: limitPerStatus,
+      batchLimit,
       claimLockSec: CLAIM_LOCK_MS / 1000,
       lastError: null,
     });
 
     while (!durdurmaSinyali) {
       try {
-        const ozet = await runBatch(limitPerStatus);
+        const ozet = await runBatch(batchLimit);
         await writeHeartbeat(db, {
           status: "calisiyor",
           lastBatchAt: FieldValue.serverTimestamp(),
@@ -359,7 +409,7 @@ export async function main() {
 
   // Tek seferlik koşum kalp atışı yazmaz: elle çalıştırılan bir parti,
   // servis olarak koşan worker'ın durum kaydını ezmemeli.
-  await runBatch(limitPerStatus);
+  await runBatch(batchLimit);
 }
 
 // Modül yüklenirken worker başlamamalı: import edilmesi bile faturaları işlemeye
