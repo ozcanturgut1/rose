@@ -3,6 +3,7 @@ import { ensureAdmin } from "../adminInit.js";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { syncApprovedInvoiceToEta } from "../etaInvoiceSync.js";
 import { formatEtaError } from "../etaError.js";
+import { evaluateAracPlakaKapisi } from "../plakaTespit.js";
 
 function normalizeStatus(value) {
   return String(value || "")
@@ -19,8 +20,40 @@ async function processDoc(db, docSnap) {
 
   const eta = normalizeStatus(data.etaKayitDurumu);
   if (eta === "tamamlandi") return { skipped: true, reason: "already_done" };
+  // Plaka blokajı yeniden denemekle çözülmez: kapı dokümandaki aracPlakaDurumu
+  // alanını okur ve o alan yalnızca zenginleştirme aşamasında yazılır. Araç
+  // company_vehicles'a eklendikten sonra tespitin yeniden koşması gerekir, aksi
+  // halde her turda aynı blokaj tekrar yazılırdı. (beklemede_kurfarki bilinçli
+  // olarak burada değil: o karar her turda SQL'den yeniden hesaplanıyor, yani
+  // sorun giderildiğinde kendiliğinden başarılı olabiliyor.)
+  if (eta === "beklemede_plaka") return { skipped: true, reason: "plaka_blokajli" };
 
   const ref = db.collection("qnb_invoices").doc(docId);
+
+  // Araç gideri faturasında plaka eşleşmemişse kayıt yapılmaz: binek/ticari ayrımı
+  // belirlenemediği için fatura normal ticari muhasebeyle, yani yanlış hesaplara
+  // kaydedilirdi. Bulut trigger'ıyla aynı kapı (plakaTespit.js).
+  const plakaKapisi = await evaluateAracPlakaKapisi({ db, data });
+  if (plakaKapisi.tespitHatasi) {
+    console.warn(`[WARN] ${docId}: plaka tespiti başarısız: ${plakaKapisi.tespitHatasi}`);
+  }
+  if (plakaKapisi.guncellenenAlanlar) {
+    await ref.set(plakaKapisi.guncellenenAlanlar, { merge: true });
+    // syncApprovedInvoiceToEta binek dalı aracTespit'i okur.
+    Object.assign(data, plakaKapisi.guncellenenAlanlar);
+  }
+  if (plakaKapisi.blocked) {
+    await ref.set(
+      {
+        etaKayitDurumu: "beklemede_plaka",
+        etaKayitGuncellemeTarihi: FieldValue.serverTimestamp(),
+        etaKayitHata: plakaKapisi.mesaj,
+      },
+      { merge: true }
+    );
+    return { skipped: false, blocked: true, reason: `plaka_${plakaKapisi.durum}` };
+  }
+
   await ref.set(
     {
       etaKayitDurumu: "isleniyor",

@@ -5,7 +5,7 @@ ensureAdmin();
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { syncApprovedInvoiceToEta } from "../etaInvoiceSync.js";
 import { formatEtaError } from "../etaError.js";
-import { detectAracGideri, aracGideriUpdateFields } from "../plakaTespit.js";
+import { evaluateAracPlakaKapisi } from "../plakaTespit.js";
 
 function normalizeStatus(value) {
   return String(value || "")
@@ -59,43 +59,30 @@ export const onQnbInvoiceApproved = onDocumentUpdated(
     }
 
     // Araç gideri (kira/yakıt) tedarikçisi ise plaka bulunmadan ETA'ya kayıt YAPILMAZ.
-    // enrich aşamasında alanlar yazılmışsa onları kullan; eski/eksik kayıtta yeniden tespit et.
-    let aracInfo = {
-      aracGideriTedarikci: after.aracGideriTedarikci === true,
-      aracPlakaDurumu: after.aracPlakaDurumu,
-    };
-    if (after.aracGideriTedarikci === undefined) {
-      try {
-        const det = await detectAracGideri({
-          db,
-          qnbRaw: after.qnbRaw,
-          ublParsed: after.ublParsed,
-          contentUbl: after.contentUbl,
-        });
-        aracInfo = det;
-        const fields = aracGideriUpdateFields(det);
-        await ref.set(fields, { merge: true });
-        // Bellekteki after'a da uygula: syncApprovedInvoiceToEta binek dalı aracTespit'i okur.
-        Object.assign(after, fields);
-      } catch (aracErr) {
-        console.warn("onQnbInvoiceApproved: plaka tespiti başarısız", docId, aracErr?.message || aracErr);
-      }
+    // Aynı kapı yerel worker'da da uygulanır; kural plakaTespit.js'te tek yerde durur.
+    const plakaKapisi = await evaluateAracPlakaKapisi({ db, data: after });
+    if (plakaKapisi.tespitHatasi) {
+      console.warn("onQnbInvoiceApproved: plaka tespiti başarısız", docId, plakaKapisi.tespitHatasi);
     }
-    if (aracInfo.aracGideriTedarikci === true && normalizeStatus(aracInfo.aracPlakaDurumu) !== "eslesti") {
-      const durum = aracInfo.aracPlakaDurumu || "eksik";
-      const mesaj =
-        durum === "tanimsiz"
-          ? "Araç gideri faturası: UBL'de bulunan plaka company_vehicles'ta tanımlı değil (binek/ticari belirlenemedi). ETA kaydı yapılmadı."
-          : "Araç gideri faturası: UBL'de plaka bulunamadı. ETA kaydı yapılmadı.";
+    if (plakaKapisi.guncellenenAlanlar) {
+      await ref.set(plakaKapisi.guncellenenAlanlar, { merge: true });
+      // Bellekteki after'a da uygula: syncApprovedInvoiceToEta binek dalı aracTespit'i okur.
+      Object.assign(after, plakaKapisi.guncellenenAlanlar);
+    }
+    if (plakaKapisi.blocked) {
       await ref.set(
         {
           etaKayitDurumu: "beklemede_plaka",
           etaKayitGuncellemeTarihi: FieldValue.serverTimestamp(),
-          etaKayitHata: mesaj,
+          etaKayitHata: plakaKapisi.mesaj,
         },
         { merge: true }
       );
-      console.warn("onQnbInvoiceApproved: araç gideri plaka eksik/tanımsız, ETA atlandı", docId, durum);
+      console.warn(
+        "onQnbInvoiceApproved: araç gideri plaka eksik/tanımsız, ETA atlandı",
+        docId,
+        plakaKapisi.durum
+      );
       return;
     }
 

@@ -216,3 +216,75 @@ export function aracGideriUpdateFields(det) {
   if (det.aracTespit !== undefined) out.aracTespit = det.aracTespit;
   return out;
 }
+
+const PLAKA_BLOK_MESAJLARI = {
+  tanimsiz:
+    "Araç gideri faturası: UBL'de bulunan plaka company_vehicles'ta tanımlı değil " +
+    "(binek/ticari belirlenemedi). ETA kaydı yapılmadı.",
+  eksik: "Araç gideri faturası: UBL'de plaka bulunamadı. ETA kaydı yapılmadı.",
+};
+
+function normalizePlakaDurumu(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replaceAll("ı", "i");
+}
+
+/**
+ * Araç gideri faturaları için ETA kayıt kapısı.
+ *
+ * Plaka eşleşmediğinde kayıt YAPILMAMALIDIR: binek/ticari ayrımı belirlenemediği
+ * için `syncApprovedInvoiceToEta` binek dalını atlar ve fatura normal ticari
+ * muhasebeyle kaydedilir, yani yanlış hesaplara fiş düşer.
+ *
+ * `aracGideriTedarikci` / `aracPlakaDurumu` alanları normalde zenginleştirme
+ * aşamasında (`enrichInvoiceWithRelatedDespatches`) yazılır. Alan hiç yazılmamış
+ * eski kayıtlarda tespit burada bir kez yapılır; tespit hata verirse kapı açık
+ * bırakılır ve `tespitHatasi` doldurulur.
+ *
+ * Modülün sözleşmesine uygun olarak Firestore'a YAZMAZ. `guncellenenAlanlar`
+ * doluysa çağıran tarafın dokümana merge etmesi gerekir.
+ *
+ * Dönüş: { blocked, durum?, mesaj?, guncellenenAlanlar, tespitHatasi }
+ */
+export async function evaluateAracPlakaKapisi({ db = getFirestore(), data }) {
+  let info = {
+    aracGideriTedarikci: data?.aracGideriTedarikci === true,
+    aracPlakaDurumu: data?.aracPlakaDurumu,
+  };
+  let guncellenenAlanlar = null;
+  let tespitHatasi = null;
+
+  if (data?.aracGideriTedarikci === undefined) {
+    try {
+      const det = await detectAracGideri({
+        db,
+        qnbRaw: data?.qnbRaw,
+        ublParsed: data?.ublParsed,
+        contentUbl: data?.contentUbl,
+      });
+      info = det;
+      guncellenenAlanlar = aracGideriUpdateFields(det);
+    } catch (err) {
+      tespitHatasi = err?.message || String(err);
+    }
+  }
+
+  if (info.aracGideriTedarikci !== true) {
+    return { blocked: false, guncellenenAlanlar, tespitHatasi };
+  }
+
+  const durum = normalizePlakaDurumu(info.aracPlakaDurumu) || "eksik";
+  if (durum === "eslesti") {
+    return { blocked: false, guncellenenAlanlar, tespitHatasi };
+  }
+
+  return {
+    blocked: true,
+    durum,
+    mesaj: PLAKA_BLOK_MESAJLARI[durum] || PLAKA_BLOK_MESAJLARI.eksik,
+    guncellenenAlanlar,
+    tespitHatasi,
+  };
+}
