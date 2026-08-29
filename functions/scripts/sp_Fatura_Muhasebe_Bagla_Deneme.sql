@@ -1,3 +1,6 @@
+/* DIKKAT: Bu dosya {{REF_DB}} yer tutucusu icerir ve SSMS'e dogrudan yapistirilamaz.
+   Kurulum patchSpFaturaMuhasebeBaglaTevkifat.js ile yapilmalidir; script yer tutucuyu
+   DB_READ_NAME ile degistirir. */
 CREATE PROCEDURE dbo.sp_Fatura_Muhasebe_Bagla_Deneme
   @FatFisRefNo INT,
   @MuhFisRefNo INT OUTPUT,
@@ -215,19 +218,23 @@ BEGIN
   IF @AccTev360 IS NULL
     SET @AccTev360 = '360 01 02';
 
-  /* --- Referans fatura (ALIM hariç): tevkifatlı ise hesap kodları korunur --- */
+  /* --- Referans fatura (ALIM hariç): tevkifatlı ise hesap kodları korunur ---
+     @RefFatFisRefNo, JS tarafında findStockCodeBySupplierHistory ile okuma DB'sinden
+     (DB_READ_NAME) çözülen bir FATFIS refno'sudur; bu yüzden referans satırları da
+     aynı DB'den okunmalıdır. {{REF_DB}} yer tutucusu kurulum sırasında
+     patchSpFaturaMuhasebeBaglaTevkifat.js tarafından DB_READ_NAME ile değiştirilir. */
   IF @RefFatFisRefNo IS NOT NULL AND @RefFatFisRefNo > 0 AND @FatTip <> 1
   BEGIN
     DECLARE @RefMuh INT = (
       SELECT TOP 1 ISNULL(FATFISMUHREFNO, 0)
-      FROM ETA_TEKNIKFILAMENT_2026.dbo.FATFIS WITH (NOLOCK)
+      FROM {{REF_DB}}.dbo.FATFIS WITH (NOLOCK)
       WHERE FATFISREFNO = @RefFatFisRefNo
     );
 
     IF @RefMuh > 0
       AND EXISTS (
         SELECT 1
-        FROM ETA_TEKNIKFILAMENT_2026.dbo.MUHHAR WITH (NOLOCK)
+        FROM {{REF_DB}}.dbo.MUHHAR WITH (NOLOCK)
         WHERE MUHHARREFNO = @RefMuh
       )
     BEGIN
@@ -280,7 +287,7 @@ BEGIN
         CAST(MUHHARTUTAR AS DECIMAL(28, 9)) AS amt,
         CAST(NULL AS VARCHAR(20)) AS role
       INTO #ref
-      FROM ETA_TEKNIKFILAMENT_2026.dbo.MUHHAR WITH (NOLOCK)
+      FROM {{REF_DB}}.dbo.MUHHAR WITH (NOLOCK)
       WHERE MUHHARREFNO = @RefMuh;
 
       IF @hasTevkifat = 1 AND @isAlisLike = 1

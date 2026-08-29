@@ -10,9 +10,13 @@
  * Normal (ticari / araç dışı) faturaların muhasebe kaydına DOKUNMAZ; bu prosedür
  * yalnızca binek araç faturaları için JS tarafından çağrılır.
  *
+ * Hedef DB varsayılan olarak DB_WRITE_NAME'dir; --target-db ile .env'e dokunmadan
+ * başka bir DB'ye (ör. canlı) kurulum yapılabilir.
+ *
  * Güvenlik: default DRY-RUN.
  *   node scripts/patchSpFaturaMuhasebeBaglaBinekArac.js
- *   node scripts/patchSpFaturaMuhasebeBaglaBinekArac.js --apply --confirm-write-db=ETA_DENEME_2026
+ *   node scripts/patchSpFaturaMuhasebeBaglaBinekArac.js --apply --confirm-target-db=ETA_DENEME_2026
+ *   node scripts/patchSpFaturaMuhasebeBaglaBinekArac.js --target-db=ETA_TEKNIKFILAMENT_2026 --apply --confirm-target-db=ETA_TEKNIKFILAMENT_2026
  */
 import "dotenv/config";
 import fs from "node:fs";
@@ -25,7 +29,7 @@ const PROC = "sp_Fatura_Muhasebe_Bagla_BinekArac";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SQL_FILE = path.join(__dirname, "sp_Fatura_Muhasebe_Bagla_BinekArac.sql");
 
-// Prosedürün MUHHAR'a yazacağı hesap kodları; deploy öncesi write DB'de var mı diye kontrol edilir.
+// Prosedürün MUHHAR'a yazacağı hesap kodları; deploy öncesi hedef DB'de var mı diye kontrol edilir.
 const REQUIRED_ACCOUNTS = [
   "730 4 28",
   "770 4 34",
@@ -38,11 +42,15 @@ const REQUIRED_ACCOUNTS = [
 ];
 
 function parseArgs(argv) {
-  const out = { apply: false, confirmWriteDb: null };
+  const out = { apply: false, confirmTargetDb: null, targetDb: null };
   for (const a of argv.slice(2)) {
     if (a === "--apply") out.apply = true;
+    else if (a.startsWith("--target-db=")) out.targetDb = a.slice("--target-db=".length).trim();
+    // --confirm-write-db eski yazım; geriye dönük uyumluluk için korunuyor.
     else if (a.startsWith("--confirm-write-db=")) {
-      out.confirmWriteDb = a.slice("--confirm-write-db=".length).trim();
+      out.confirmTargetDb = a.slice("--confirm-write-db=".length).trim();
+    } else if (a.startsWith("--confirm-target-db=")) {
+      out.confirmTargetDb = a.slice("--confirm-target-db=".length).trim();
     }
   }
   return out;
@@ -92,22 +100,27 @@ async function checkAccounts(pool) {
 async function main() {
   const args = parseArgs(process.argv);
   const t = resolveSqlTargets();
+  const targetDb = args.targetDb || t.writeDb;
   const body = loadProcedureBody();
 
   console.log("=".repeat(72));
   console.log(`PATCH: ${PROC} (binek araç muhasebe)`);
-  console.log(`DB: ${t.writeDb}  Mode: ${args.apply ? "APPLY" : "DRY-RUN"}`);
+  console.log(`Hedef DB: ${targetDb}${args.targetDb ? " (--target-db)" : " (DB_WRITE_NAME)"}`);
+  console.log(`Mode: ${args.apply ? "APPLY" : "DRY-RUN"}`);
   console.log(`Kaynak: ${SQL_FILE}`);
   console.log(`Uzunluk: ${body.length} karakter`);
   console.log("=".repeat(72));
 
   if (args.apply) {
-    if (!args.confirmWriteDb) throw new Error(`Apply için --confirm-write-db=${t.writeDb} gerekli.`);
-    if (args.confirmWriteDb !== t.writeDb)
-      throw new Error(`--confirm-write-db eşleşmiyor: '${args.confirmWriteDb}' != '${t.writeDb}'`);
+    if (!args.confirmTargetDb)
+      throw new Error(`Apply için --confirm-target-db=${targetDb} gerekli.`);
+    if (args.confirmTargetDb !== targetDb)
+      throw new Error(
+        `--confirm-target-db eşleşmiyor: '${args.confirmTargetDb}' != '${targetDb}'`
+      );
   }
 
-  const pool = await new sql.ConnectionPool(sqlConfig(t.writeDb)).connect();
+  const pool = await new sql.ConnectionPool(sqlConfig(targetDb)).connect();
   try {
     const exists = await pool
       .request()
@@ -117,20 +130,24 @@ async function main() {
     const { tbl, missing } = await checkAccounts(pool);
     console.log(`Hesap planı tablosu: ${tbl || "(bulunamadı)"}`);
     if (missing.length) {
-      console.log(`[UYARI] Write DB'de eksik hesap kodları: ${missing.join(", ")}`);
+      console.log(`[UYARI] '${targetDb}' içinde eksik hesap kodları: ${missing.join(", ")}`);
     } else {
-      console.log(`[OK] Gerekli hesap kodları write DB'de mevcut.`);
+      console.log(`[OK] Gerekli hesap kodları '${targetDb}' içinde mevcut.`);
     }
 
     if (!args.apply) {
       console.log("\nDRY-RUN: Değişiklik uygulanmadı.");
-      console.log(`  node scripts/patchSpFaturaMuhasebeBaglaBinekArac.js --apply --confirm-write-db=${t.writeDb}`);
+      console.log(
+        `  node scripts/patchSpFaturaMuhasebeBaglaBinekArac.js` +
+          (args.targetDb ? ` --target-db=${targetDb}` : "") +
+          ` --apply --confirm-target-db=${targetDb}`
+      );
       return;
     }
 
     if (missing.length) {
       throw new Error(
-        `Eksik hesap kodları nedeniyle apply durduruldu: ${missing.join(", ")}. Önce write DB'de bu hesapları açın.`
+        `Eksik hesap kodları nedeniyle apply durduruldu: ${missing.join(", ")}. Önce '${targetDb}' içinde bu hesapları açın.`
       );
     }
 

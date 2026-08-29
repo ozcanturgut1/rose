@@ -13,10 +13,15 @@
  *   - Sorumlu KDV → 191 109 borç + 360 alacak (fiş dengesi; üretim şablonu)
  *   - MUHFISKAYITONC = 4, MUHFISNO = mevcut MA- dizisinin devamı, MUHFISMATATEFLAG = 1 (arayüz listesi), SIRKETLOG (modul 4)
  *
+ * Hedef DB varsayılan olarak DB_WRITE_NAME'dir; --target-db ile .env'e dokunmadan
+ * başka bir DB'ye (ör. canlı) kurulum yapılabilir. SQL dosyasındaki {{REF_DB}} yer
+ * tutucusu kurulum sırasında DB_READ_NAME ile değiştirilir.
+ *
  * Güvenlik: default DRY-RUN.
  *
  *   node scripts/patchSpFaturaMuhasebeBaglaTevkifat.js
- *   node scripts/patchSpFaturaMuhasebeBaglaTevkifat.js --apply --confirm-write-db=ETA_DENEME_2026
+ *   node scripts/patchSpFaturaMuhasebeBaglaTevkifat.js --apply --confirm-target-db=ETA_DENEME_2026
+ *   node scripts/patchSpFaturaMuhasebeBaglaTevkifat.js --target-db=ETA_TEKNIKFILAMENT_2026 --apply --confirm-target-db=ETA_TEKNIKFILAMENT_2026
  */
 import "dotenv/config";
 import fs from "node:fs";
@@ -28,14 +33,19 @@ import { resolveSqlTargets } from "../sqlDbTargets.js";
 const PROC = "sp_Fatura_Muhasebe_Bagla_Deneme";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SQL_FILE = path.join(__dirname, "sp_Fatura_Muhasebe_Bagla_Deneme.sql");
+const REF_DB_TOKEN = "{{REF_DB}}";
 
 function parseArgs(argv) {
-  const out = { apply: false, confirmWriteDb: null, syncFatmuhgrpOnly: false };
+  const out = { apply: false, confirmTargetDb: null, syncFatmuhgrpOnly: false, targetDb: null };
   for (const a of argv.slice(2)) {
     if (a === "--apply") out.apply = true;
     else if (a === "--sync-fatmuhgrp-only") out.syncFatmuhgrpOnly = true;
+    else if (a.startsWith("--target-db=")) out.targetDb = a.slice("--target-db=".length).trim();
+    // --confirm-write-db eski yazım; geriye dönük uyumluluk için korunuyor.
     else if (a.startsWith("--confirm-write-db=")) {
-      out.confirmWriteDb = a.slice("--confirm-write-db=".length).trim();
+      out.confirmTargetDb = a.slice("--confirm-write-db=".length).trim();
+    } else if (a.startsWith("--confirm-target-db=")) {
+      out.confirmTargetDb = a.slice("--confirm-target-db=".length).trim();
     }
   }
   return out;
@@ -77,32 +87,71 @@ function sqlConfig(database) {
   };
 }
 
-export function loadPatchedProcedureBody() {
-  return fs.readFileSync(SQL_FILE, "utf8").trim();
+/**
+ * Prosedür gövdesini okur ve {{REF_DB}} yer tutucusunu referans (okuma) DB adıyla
+ * değiştirir. Referans fatura satırları JS tarafındaki çözümlemeyle aynı DB'den
+ * okunmak zorunda olduğu için DB adı gövdeye kurulum anında gömülür; böylece
+ * çalışma zamanında dinamik SQL gerekmez ve yıl devrinde .env değişip prosedür
+ * yeniden kurulduğunda adres kendiliğinden güncellenir.
+ */
+export function loadPatchedProcedureBody(refDb) {
+  if (!refDb) throw new Error("loadPatchedProcedureBody: refDb zorunlu.");
+  const raw = fs.readFileSync(SQL_FILE, "utf8").trim();
+  if (!raw.includes(REF_DB_TOKEN)) {
+    throw new Error(
+      `${SQL_FILE} içinde ${REF_DB_TOKEN} yer tutucusu bulunamadı; referans DB adı sabitlenmiş olabilir.`
+    );
+  }
+  const body = raw.split(REF_DB_TOKEN).join(`[${refDb.replace(/]/g, "]]")}]`);
+  if (body.includes(REF_DB_TOKEN)) {
+    throw new Error(`${REF_DB_TOKEN} yer tutucusu değiştirilemedi.`);
+  }
+
+  // Tek beklenen çapraz DB adresi referans DB'dir; başka bir ad kalmışsa kurulum durur.
+  const unexpected = new Set();
+  for (const m of body.matchAll(/\[?([A-Za-z0-9_]+)\]?\.dbo\./g)) {
+    if (m[1].toLowerCase() !== refDb.toLowerCase()) unexpected.add(m[1]);
+  }
+  if (unexpected.size) {
+    throw new Error(
+      `Beklenmeyen çapraz DB referansı: ${[...unexpected].join(", ")} (beklenen: ${refDb}).`
+    );
+  }
+
+  return body;
 }
 
 async function main() {
   const args = parseArgs(process.argv);
   const t = resolveSqlTargets();
-  const body = loadPatchedProcedureBody();
+  const targetDb = args.targetDb || t.writeDb;
+  const body = loadPatchedProcedureBody(t.readDb);
+  // Hedef ve okuma DB'si aynı canlı veritabanına denk geldiğinde FATMUHGRUP senkronu
+  // kendi kendine UPDATE'e dönüşür; anlamsız yazma yapmamak için atlanır.
+  const syncFatmuhgrp = targetDb.toLowerCase() !== t.readDb.toLowerCase();
 
   console.log("=".repeat(72));
   console.log(`PATCH: ${PROC} (tevkifat muhasebe mantığı)`);
-  console.log(`DB: ${t.writeDb}  Mode: ${args.apply ? "APPLY" : "DRY-RUN"}`);
+  console.log(`Hedef DB: ${targetDb}${args.targetDb ? " (--target-db)" : " (DB_WRITE_NAME)"}`);
+  console.log(`Referans DB (${REF_DB_TOKEN}): ${t.readDb}`);
+  console.log(`Mode: ${args.apply ? "APPLY" : "DRY-RUN"}`);
   console.log(`Kaynak: ${SQL_FILE}`);
   console.log(`Uzunluk: ${body.length} karakter`);
+  console.log(
+    `FATMUHGRUP senkron: ${syncFatmuhgrp ? "evet" : "atlanacak (hedef = referans DB)"}`
+  );
   console.log("=".repeat(72));
 
   if (args.apply) {
-    if (!args.confirmWriteDb) {
-      throw new Error(`Apply için --confirm-write-db=${t.writeDb} gerekli.`);
+    if (!args.confirmTargetDb) {
+      throw new Error(`Apply için --confirm-target-db=${targetDb} gerekli.`);
     }
-    if (args.confirmWriteDb !== t.writeDb) {
-      throw new Error(`--confirm-write-db eşleşmiyor: '${args.confirmWriteDb}' != '${t.writeDb}'`);
+    if (args.confirmTargetDb !== targetDb) {
+      throw new Error(`--confirm-target-db eşleşmiyor: '${args.confirmTargetDb}' != '${targetDb}'`);
     }
   }
 
-  const pool = await new sql.ConnectionPool(sqlConfig(t.writeDb)).connect();
+  const pool = await new sql.ConnectionPool(sqlConfig(targetDb)).connect();
   try {
     const exists = await pool
       .request()
@@ -111,12 +160,15 @@ async function main() {
 
     if (!args.apply) {
       console.log("\nDRY-RUN: Değişiklik uygulanmadı.");
+      const targetOpt = args.targetDb ? ` --target-db=${targetDb}` : "";
       console.log(
-        `  node scripts/patchSpFaturaMuhasebeBaglaTevkifat.js --apply --confirm-write-db=${t.writeDb}`
+        `  node scripts/patchSpFaturaMuhasebeBaglaTevkifat.js${targetOpt} --apply --confirm-target-db=${targetDb}`
       );
-      console.log(
-        `  (yalnızca FATMUHGRUP senkron) --apply --sync-fatmuhgrp-only --confirm-write-db=${t.writeDb}`
-      );
+      if (syncFatmuhgrp) {
+        console.log(
+          `  (yalnızca FATMUHGRUP senkron)${targetOpt} --apply --sync-fatmuhgrp-only --confirm-target-db=${targetDb}`
+        );
+      }
       return;
     }
 
@@ -125,13 +177,19 @@ async function main() {
         .request()
         .query(`IF OBJECT_ID('dbo.${PROC}','P') IS NOT NULL DROP PROCEDURE dbo.${PROC};`);
       await pool.request().batch(body);
-      console.log("[OK] Prosedür güncellendi.");
+      console.log(`[OK] Prosedür güncellendi (referans DB: ${t.readDb}).`);
     } else {
       console.log("(--sync-fatmuhgrp-only: prosedür adımı atlandı)");
     }
 
-    const updated = await syncFatmuhgrpKdvRows(pool, t.readDb);
-    console.log(`[OK] FATMUHGRUP KDV oran satırları senkron (${updated} güncellendi).`);
+    if (!syncFatmuhgrp) {
+      console.log(
+        `[ATLANDI] FATMUHGRUP senkronu: hedef ve referans DB aynı ('${targetDb}'), kopyalanacak bir şey yok.`
+      );
+    } else {
+      const updated = await syncFatmuhgrpKdvRows(pool, t.readDb);
+      console.log(`[OK] FATMUHGRUP KDV oran satırları senkron (${updated} güncellendi).`);
+    }
   } finally {
     await pool.close();
   }
