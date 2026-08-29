@@ -184,17 +184,24 @@ BEGIN
     ELSE @KdvOran
   END;
 
-  /* FATMUHGRP tevkifatsız KDV: FMGKDVORAN = %, FMGMUHKOD1 = alış / FMGMUHKOD2 = satış muh. kodu */
+  /* FATMUHGRP tevkifatsız KDV: FMGKDVORAN = %, FMGMUHKOD1 = alış / FMGMUHKOD2 = satış muh. kodu
+     FMGGRUPOZKOD dolu satırlar ETA'nın tevkifat kodu tanımlarıdır (ör. özkod 209 ->
+     191 109 10, sorumlu sıfatla KDV). Bunlar da FMGKDVORAN taşıdığı için filtrelenmezse
+     indirilecek KDV hesabı yerine sorumlu sıfat hesabı seçilebilir; canlıda %10 oranında
+     tam olarak bu oluyordu. FMGISLEMNO sıralamaya eşitlik bozucu olarak eklendi: aynı
+     orana sahip birden çok satır olduğunda TOP 1'in hangi satırı vereceği aksi halde
+     plana bağlı kalıyor. */
   SELECT TOP 1 @AccKdv = NULLIF(LTRIM(RTRIM(
     CASE WHEN @isAlisLike = 1 THEN FMGMUHKOD1 ELSE FMGMUHKOD2 END
   )), '')
   FROM dbo.FATMUHGRUP WITH (NOLOCK)
   WHERE FMGGRUPKOD = 'FATMUHGRP'
     AND ISNULL(FMGKDVORAN, 0) > 0
+    AND ISNULL(NULLIF(LTRIM(RTRIM(FMGGRUPOZKOD)), ''), '') = ''
     AND ISNULL(NULLIF(LTRIM(RTRIM(
       CASE WHEN @isAlisLike = 1 THEN FMGMUHKOD1 ELSE FMGMUHKOD2 END
     )), ''), '') <> ''
-  ORDER BY ABS(ISNULL(FMGKDVORAN, 0) - @KdvOranPct);
+  ORDER BY ABS(ISNULL(FMGKDVORAN, 0) - @KdvOranPct), FMGISLEMNO;
 
   IF @AccKdv IS NULL
   BEGIN
