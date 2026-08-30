@@ -288,3 +288,61 @@ export async function evaluateAracPlakaKapisi({ db = getFirestore(), data }) {
     tespitHatasi,
   };
 }
+
+/**
+ * Plaka blokajındaki bir faturayı yeniden değerlendirir: dokümanda kayıtlı
+ * plakalar `company_vehicles`'ta artık tanımlı mı?
+ *
+ * Yalnızca `tanimsiz` durumu kurtarılabilir. `eksik` durumunda UBL'de hiç plaka
+ * bulunamamıştır; araç eklemek o faturayı çözmez, plakanın elle girilmesi gerekir.
+ * İkisini ayırmak önemli: aksi halde her turda kurtarılamayacak faturalar için de
+ * boşuna sorgu yapılırdı.
+ *
+ * `evaluateAracPlakaKapisi`'nden farkı, ilk tespiti yeniden koşmaması: UBL'den
+ * plaka çıkarma işi zaten yapılmış ve sonucu dokümanda duruyor; burada sadece
+ * araç tanımına bakılır. Bu yüzden maliyeti plaka sayısı kadar doküman okuması.
+ *
+ * Modülün sözleşmesine uygun olarak Firestore'a YAZMAZ.
+ *
+ * Dönüş: { cozuldu, durum, plaka?, guncellenenAlanlar }
+ */
+export async function recheckPlakaBlokaji({ db = getFirestore(), data }) {
+  const durum = normalizePlakaDurumu(data?.aracPlakaDurumu) || "eksik";
+  if (durum !== "tanimsiz") {
+    return { cozuldu: false, durum, guncellenenAlanlar: null };
+  }
+
+  const plakalar = Array.isArray(data?.tespitEdilenPlakalar) ? data.tespitEdilenPlakalar : [];
+  if (!plakalar.length) return { cozuldu: false, durum, guncellenenAlanlar: null };
+
+  for (const ham of plakalar) {
+    const norm = normalizePlaka(ham);
+    if (!norm) continue;
+    const v = await lookupVehicle(db, norm);
+    if (!v) continue;
+
+    const tipRaw = String(v.tip || "").trim().toLowerCase();
+    const aracTipi = tipRaw === "binek" || tipRaw === "ticari" ? tipRaw : null;
+    // Araç tanımlı ama tipi hâlâ belirsizse binek/ticari ayrımı yapılamaz;
+    // blokaj sürmeli, yoksa fatura yanlış hesaplara kaydedilir.
+    if (!aracTipi) continue;
+
+    return {
+      cozuldu: true,
+      durum: "eslesti",
+      plaka: v.plaka || norm,
+      guncellenenAlanlar: {
+        aracPlakaDurumu: "eslesti",
+        aracTespit: {
+          plaka: v.plaka || norm,
+          plakaNormalize: norm,
+          aracTipi,
+          eslesti: true,
+          kaynak: "yeniden_tespit",
+        },
+      },
+    };
+  }
+
+  return { cozuldu: false, durum, guncellenenAlanlar: null };
+}

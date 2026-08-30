@@ -34,7 +34,7 @@ import { ensureAdmin } from "../adminInit.js";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { syncApprovedInvoiceToEta } from "../etaInvoiceSync.js";
 import { formatEtaError } from "../etaError.js";
-import { evaluateAracPlakaKapisi } from "../plakaTespit.js";
+import { evaluateAracPlakaKapisi, recheckPlakaBlokaji } from "../plakaTespit.js";
 
 const WORKER_ID = `${os.hostname()}:${process.pid}`;
 // Kilit süresi: bunu aşan 'isleniyor' kayıtları çökmüş bir worker'dan kalmış
@@ -117,15 +117,31 @@ async function processDoc(db, docSnap) {
 
   const eta = normalizeStatus(data.etaKayitDurumu);
   if (eta === "tamamlandi") return { skipped: true, reason: "already_done" };
-  // Plaka blokajı yeniden denemekle çözülmez: kapı dokümandaki aracPlakaDurumu
-  // alanını okur ve o alan yalnızca zenginleştirme aşamasında yazılır. Araç
-  // company_vehicles'a eklendikten sonra tespitin yeniden koşması gerekir, aksi
-  // halde her turda aynı blokaj tekrar yazılırdı. (beklemede_kurfarki bilinçli
-  // olarak burada değil: o karar her turda SQL'den yeniden hesaplanıyor, yani
-  // sorun giderildiğinde kendiliğinden başarılı olabiliyor.)
-  if (eta === "beklemede_plaka") return { skipped: true, reason: "plaka_blokajli" };
-
   const ref = db.collection("qnb_invoices").doc(docId);
+
+  // Plaka blokajı: araç sonradan company_vehicles'a eklenmiş olabilir. Dokümanda
+  // kayıtlı plakalar yeniden aranır; çözülmediyse hiçbir şey yazmadan atlanır,
+  // böylece her tur aynı blokajı tekrar yazmaz. Yalnızca 'tanimsiz' kurtarılabilir
+  // ('eksik' durumunda UBL'de plaka yoktur, araç eklemek çözmez).
+  if (eta === "beklemede_plaka") {
+    const yeniden = await recheckPlakaBlokaji({ db, data });
+    if (!yeniden.cozuldu) {
+      return { skipped: true, reason: `plaka_${yeniden.durum}` };
+    }
+    await ref.set(
+      {
+        ...yeniden.guncellenenAlanlar,
+        // Blokaj kalkıyor: doküman yeniden "işlenmeyi bekliyor" durumuna döner.
+        etaKayitDurumu: FieldValue.delete(),
+        etaKayitHata: FieldValue.delete(),
+        etaKayitGuncellemeTarihi: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+    Object.assign(data, yeniden.guncellenenAlanlar);
+    delete data.etaKayitDurumu;
+    console.log(`[INFO] ${docId}: plaka blokaji cozuldu (${yeniden.plaka}), isleniyor`);
+  }
 
   // Araç gideri faturasında plaka eşleşmemişse kayıt yapılmaz: binek/ticari ayrımı
   // belirlenemediği için fatura normal ticari muhasebeyle, yani yanlış hesaplara
@@ -227,9 +243,22 @@ async function processDoc(db, docSnap) {
   }
 }
 
-// Toplama sırasında elenen durumlar: bunlar processDoc'un da baştan atladığı,
-// yeniden denemekle değişmeyecek durumlar.
-const ISLENMEYECEK_DURUMLAR = new Set(["tamamlandi", "beklemede_plaka"]);
+// Toplama sırasında elenen durumlar: yeniden denemekle değişmeyecek olanlar.
+const ISLENMEYECEK_DURUMLAR = new Set(["tamamlandi"]);
+
+/**
+ * Plaka blokajındaki bir doküman yeniden denenmeye değer mi?
+ *
+ * Yalnızca UBL'de plaka bulunmuş ama araç tanımsız olan kayıtlar kurtarılabilir;
+ * araç company_vehicles'a eklendiğinde çözülürler. 'eksik' olanlarda UBL'de hiç
+ * plaka yoktur, dolayısıyla her turda sorgulamanın anlamı yok. Karar dokümanda
+ * zaten mevcut alanlarla veriliyor, ek okuma yapılmıyor.
+ */
+function plakaBlokajiYenidenDenenebilir(data) {
+  if (normalizeStatus(data?.aracPlakaDurumu) !== "tanimsiz") return false;
+  const plakalar = data?.tespitEdilenPlakalar;
+  return Array.isArray(plakalar) && plakalar.length > 0;
+}
 
 /**
  * İşlenmeyi bekleyen onaylı faturaları toplar.
@@ -259,7 +288,10 @@ export async function collectPendingDocs(col, limit, sayfaBoyutu = 200) {
       if (snap.empty) break;
       scanned += snap.size;
       for (const d of snap.docs) {
-        if (ISLENMEYECEK_DURUMLAR.has(normalizeStatus(d.data()?.etaKayitDurumu))) continue;
+        const veri = d.data();
+        const durum = normalizeStatus(veri?.etaKayitDurumu);
+        if (ISLENMEYECEK_DURUMLAR.has(durum)) continue;
+        if (durum === "beklemede_plaka" && !plakaBlokajiYenidenDenenebilir(veri)) continue;
         docs.set(d.id, d);
         if (docs.size >= limit) break;
       }
