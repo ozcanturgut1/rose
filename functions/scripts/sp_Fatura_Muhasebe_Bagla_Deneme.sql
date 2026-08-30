@@ -41,7 +41,8 @@ BEGIN
     @MuhKayitOnc INT = 4,
     @MaxMuhRef INT,
     @NextHar INT,
-    @NextFisNoInt INT;
+    @NextFisNoInt INT,
+    @FisTuruEtiket VARCHAR(80);
 
   SELECT
     @FatTip = FATFISTIPI,
@@ -84,6 +85,34 @@ BEGIN
 
   IF ISNULL(@EvrakNo, '') = ''
     SET @EvrakNo = 'FAT-' + CAST(@FatFisRefNo AS VARCHAR(20));
+
+  /* Muhasebe fişinin belge türü etiketi (MUHFISEKCHAR2). Değerler ETA'nın kendi
+     kayıtlarından alındı; arayüz fişi bu metinle listeliyor. Dikkat: etiket
+     FATFISTIP kodunun birebir aynısı değil — satış tarafında ETA 'YURT İÇİ'
+     ön ekini ekliyor. Tevkifat ayrı bir bayrak değil ayrı fiş tipidir (7/8);
+     tevkifatlı bir GİDER faturası yine 'GİDER FATURASI' etiketi alır. */
+  SET @FisTuruEtiket = CASE @FatTip
+    WHEN 1 THEN 'ALIM FATURASI'
+    WHEN 2 THEN 'ALIM İADE FATURASI'
+    WHEN 3 THEN 'YURT İÇİ SATIŞ FATURASI'
+    WHEN 4 THEN 'YURT İÇİ SATIŞ İADE FATURASI'
+    WHEN 5 THEN 'YURT DIŞI SATIŞ FATURASI'
+    WHEN 7 THEN 'TEVKİFATLI SATIŞ FATURASI'
+    WHEN 8 THEN 'TEVKİFATLI ALIŞ FATURASI'
+    WHEN 9 THEN 'GİDER FATURASI'
+    WHEN 11 THEN 'YURT DIŞI ALIM FATURASI'
+    WHEN 12 THEN 'İHRAÇ KAYITLI SATIŞ FATURASI'
+    WHEN 13 THEN 'YANSITMA SATIŞ FATURASI'
+    ELSE NULL
+  END;
+
+  -- Örneği olmayan tipler (6, 10) için genel kural: fiş tipi kodu + ' FATURASI'.
+  IF @FisTuruEtiket IS NULL
+    SELECT TOP 1 @FisTuruEtiket = LTRIM(RTRIM(FATFTKOD)) + ' FATURASI'
+    FROM dbo.FATFISTIP WITH (NOLOCK)
+    WHERE FATFTNO = @FatTip;
+
+  SET @FisTuruEtiket = ISNULL(NULLIF(LTRIM(RTRIM(@FisTuruEtiket)), ''), 'FATURA');
 
   SELECT TOP 1
     @LineAciklama = ISNULL(NULLIF(LTRIM(RTRIM(FATHARACIKLAMA)), ''), ISNULL(NULLIF(LTRIM(RTRIM(FATHARSTKCINS)), ''), @EvrakNo)),
@@ -481,8 +510,15 @@ BEGIN
       );
 
       UPDATE dbo.MUHFIS
-      SET MUHFISBORCTOP = @sumBf, MUHFISALACAKTOP = @sumAf, MUHFISMATATEFLAG = 1
+      SET MUHFISBORCTOP = @sumBf, MUHFISALACAKTOP = @sumAf, MUHFISMATATEFLAG = 1,
+          MUHFISEKCHAR2 = @FisTuruEtiket
       WHERE MUHFISREFNO = @MuhFisRefNo;
+
+      -- Evrak tarihi fişin tüm satırlarına tek seferde yazılır: MUHHAR'a birden çok
+      -- yerden satır ekleniyor ve her insert'e ayrı ayrı eklemek satır atlamaya açık.
+      UPDATE dbo.MUHHAR
+      SET MUHHAREVRAKTAR = @FisTar
+      WHERE MUHHARREFNO = @MuhFisRefNo;
 
       UPDATE dbo.FATFIS
       SET FATFISMUHREFNO = @MuhFisRefNo
@@ -801,8 +837,14 @@ BEGIN
   );
 
   UPDATE dbo.MUHFIS
-  SET MUHFISBORCTOP = @sumBf2, MUHFISALACAKTOP = @sumAf2, MUHFISMATATEFLAG = 1
+  SET MUHFISBORCTOP = @sumBf2, MUHFISALACAKTOP = @sumAf2, MUHFISMATATEFLAG = 1,
+      MUHFISEKCHAR2 = @FisTuruEtiket
   WHERE MUHFISREFNO = @MuhFisRefNo;
+
+  -- Bkz. yukarıdaki not: evrak tarihi satır satır değil, fiş bazında yazılıyor.
+  UPDATE dbo.MUHHAR
+  SET MUHHAREVRAKTAR = @FisTar
+  WHERE MUHHARREFNO = @MuhFisRefNo;
 
   UPDATE dbo.FATFIS
   SET FATFISMUHREFNO = @MuhFisRefNo

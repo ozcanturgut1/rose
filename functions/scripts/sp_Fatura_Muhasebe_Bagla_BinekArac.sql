@@ -27,9 +27,12 @@ BEGIN
     @NextHar INT,
     @MuhFisNo VARCHAR(40),
     @NextFisNoInt INT,
-    @Sira INT = 0;
+    @Sira INT = 0,
+    @FatTip INT,
+    @FisTuruEtiket VARCHAR(80);
 
   SELECT
+    @FatTip = FATFISTIPI,
     @CariKod = FATFISCARKOD,
     @EvrakNo = FATFISEVRAKNO1,
     @FisTar = FATFISTAR,
@@ -51,6 +54,31 @@ BEGIN
 
   IF ISNULL(@EvrakNo, '') = ''
     SET @EvrakNo = 'FAT-' + CAST(@FatFisRefNo AS VARCHAR(20));
+
+  /* Belge türü etiketi (MUHFISEKCHAR2). Değerler ETA'nın kendi kayıtlarından;
+     sp_Fatura_Muhasebe_Bagla_Deneme ile aynı sözlük kullanılıyor. Binek araç
+     faturaları pratikte GİDER (9) tipinden gelir, yine de tam liste tutuluyor. */
+  SET @FisTuruEtiket = CASE @FatTip
+    WHEN 1 THEN 'ALIM FATURASI'
+    WHEN 2 THEN 'ALIM İADE FATURASI'
+    WHEN 3 THEN 'YURT İÇİ SATIŞ FATURASI'
+    WHEN 4 THEN 'YURT İÇİ SATIŞ İADE FATURASI'
+    WHEN 5 THEN 'YURT DIŞI SATIŞ FATURASI'
+    WHEN 7 THEN 'TEVKİFATLI SATIŞ FATURASI'
+    WHEN 8 THEN 'TEVKİFATLI ALIŞ FATURASI'
+    WHEN 9 THEN 'GİDER FATURASI'
+    WHEN 11 THEN 'YURT DIŞI ALIM FATURASI'
+    WHEN 12 THEN 'İHRAÇ KAYITLI SATIŞ FATURASI'
+    WHEN 13 THEN 'YANSITMA SATIŞ FATURASI'
+    ELSE NULL
+  END;
+
+  IF @FisTuruEtiket IS NULL
+    SELECT TOP 1 @FisTuruEtiket = LTRIM(RTRIM(FATFTKOD)) + ' FATURASI'
+    FROM dbo.FATFISTIP WITH (NOLOCK)
+    WHERE FATFTNO = @FatTip;
+
+  SET @FisTuruEtiket = ISNULL(NULLIF(LTRIM(RTRIM(@FisTuruEtiket)), ''), 'FATURA');
 
   -- Mal (matrah) ve KDV: FATHAR toplamlarından (otorite).
   DECLARE @Mal DECIMAL(28, 2) = (
@@ -219,8 +247,15 @@ BEGIN
     FROM dbo.MUHHAR WITH (NOLOCK) WHERE MUHHARREFNO = @MuhFisRefNo);
 
   UPDATE dbo.MUHFIS
-  SET MUHFISBORCTOP = @SumB, MUHFISALACAKTOP = @SumA, MUHFISMATATEFLAG = 1
+  SET MUHFISBORCTOP = @SumB, MUHFISALACAKTOP = @SumA, MUHFISMATATEFLAG = 1,
+      MUHFISEKCHAR2 = @FisTuruEtiket
   WHERE MUHFISREFNO = @MuhFisRefNo;
+
+  -- Evrak tarihi fişin tüm satırlarına tek seferde yazılır (beş ayrı MUHHAR
+  -- insert'i var; her birine ayrı eklemek satır atlamaya açık olurdu).
+  UPDATE dbo.MUHHAR
+  SET MUHHAREVRAKTAR = @FisTar
+  WHERE MUHHARREFNO = @MuhFisRefNo;
 
   UPDATE dbo.FATFIS
   SET FATFISMUHREFNO = @MuhFisRefNo
