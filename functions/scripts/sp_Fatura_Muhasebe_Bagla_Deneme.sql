@@ -44,6 +44,16 @@ BEGIN
     @NextFisNoInt INT,
     @FisTuruEtiket VARCHAR(80);
 
+  /* Fiş üzerindeki kontrol/onay ve işyeri kodları. Şirket düzeyinde sabitler:
+     MUHFIS'te KONTKOD/ONAYKOD alanlarının 'YMM' dışında dolu bir değeri hiç yok
+     (22.875 kayıt), ISYKOD ise ISYKART'ta tanımlı iki koddan ('MERKEZ',
+     'ŞUBE (FABRİKA)') MUHFIS'te kullanılan tek değer (14.160 kayıt).
+     Sütun varsayılanları boşluk olduğu için yazılmazsa alanlar boş kalıyordu. */
+  DECLARE
+    @KontrolKod VARCHAR(40) = 'YMM',
+    @OnayKod VARCHAR(40) = 'YMM',
+    @IsyeriKod VARCHAR(40) = 'MERKEZ';
+
   SELECT
     @FatTip = FATFISTIPI,
     @CariKod = FATFISCARKOD,
@@ -511,7 +521,8 @@ BEGIN
 
       UPDATE dbo.MUHFIS
       SET MUHFISBORCTOP = @sumBf, MUHFISALACAKTOP = @sumAf, MUHFISMATATEFLAG = 1,
-          MUHFISEKCHAR2 = @FisTuruEtiket
+          MUHFISEKCHAR2 = @FisTuruEtiket,
+          MUHFISKONTKOD = @KontrolKod, MUHFISONAYKOD = @OnayKod, MUHFISISYKOD = @IsyeriKod
       WHERE MUHFISREFNO = @MuhFisRefNo;
 
       -- Evrak tarihi fişin tüm satırlarına tek seferde yazılır: MUHHAR'a birden çok
@@ -838,7 +849,8 @@ BEGIN
 
   UPDATE dbo.MUHFIS
   SET MUHFISBORCTOP = @sumBf2, MUHFISALACAKTOP = @sumAf2, MUHFISMATATEFLAG = 1,
-      MUHFISEKCHAR2 = @FisTuruEtiket
+      MUHFISEKCHAR2 = @FisTuruEtiket,
+      MUHFISKONTKOD = @KontrolKod, MUHFISONAYKOD = @OnayKod, MUHFISISYKOD = @IsyeriKod
   WHERE MUHFISREFNO = @MuhFisRefNo;
 
   -- Bkz. yukarıdaki not: evrak tarihi satır satır değil, fiş bazında yazılıyor.

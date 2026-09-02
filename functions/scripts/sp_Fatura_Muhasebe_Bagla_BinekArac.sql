@@ -31,6 +31,13 @@ BEGIN
     @FatTip INT,
     @FisTuruEtiket VARCHAR(80);
 
+  -- Şirket düzeyinde sabitler; sp_Fatura_Muhasebe_Bagla_Deneme ile aynı değerler.
+  -- Sütun varsayılanları boşluk olduğu için yazılmazsa alanlar boş kalıyordu.
+  DECLARE
+    @KontrolKod VARCHAR(40) = 'YMM',
+    @OnayKod VARCHAR(40) = 'YMM',
+    @IsyeriKod VARCHAR(40) = 'MERKEZ';
+
   SELECT
     @FatTip = FATFISTIPI,
     @CariKod = FATFISCARKOD,
@@ -248,7 +255,8 @@ BEGIN
 
   UPDATE dbo.MUHFIS
   SET MUHFISBORCTOP = @SumB, MUHFISALACAKTOP = @SumA, MUHFISMATATEFLAG = 1,
-      MUHFISEKCHAR2 = @FisTuruEtiket
+      MUHFISEKCHAR2 = @FisTuruEtiket,
+      MUHFISKONTKOD = @KontrolKod, MUHFISONAYKOD = @OnayKod, MUHFISISYKOD = @IsyeriKod
   WHERE MUHFISREFNO = @MuhFisRefNo;
 
   -- Evrak tarihi fişin tüm satırlarına tek seferde yazılır (beş ayrı MUHHAR
