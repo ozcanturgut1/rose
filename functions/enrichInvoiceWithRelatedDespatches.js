@@ -14,6 +14,7 @@ import {
 import { ublToFullJson } from "./ublToStructuredJson.js";
 import { requireAuth, requireRole, ROLES_QNB_MUTATE } from "./requireAuth.js";
 import { detectAracGideri, aracGideriUpdateFields } from "./plakaTespit.js";
+import { findDespatchInPortal } from "./qnbDespatchPortalLookup.js";
 
 const db = getFirestore();
 
@@ -104,89 +105,6 @@ function belgeNoKey(s) {
     .replace(/\s+/g, "")
     .replace(/[.-]/g, "")
     .toUpperCase();
-}
-
-function addDaysYyyyMmDd(str, days) {
-  if (!str || !/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
-  const d = new Date(`${str}T12:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
-}
-
-/** DespatchDocumentReference IssueDate → YYYY-MM-DD */
-function parseDespatchIssueDate(raw) {
-  if (raw == null || raw === "") return null;
-  const s = String(raw).trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  if (/^\d{8}$/.test(s)) return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
-  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) return s.slice(0, 10);
-  const m = s.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
-  if (m) return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
-  return null;
-}
-
-function yyyyMmDdCompactFromYmd(ymd) {
-  if (!ymd || typeof ymd !== "string") return null;
-  const t = ymd.trim().slice(0, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(t)) return null;
-  return t.replace(/-/g, "");
-}
-
-/**
- * Üçüncü argüman: { issueDate } veya { from, to } (fetchAndSaveDespatch ile uyumlu).
- * issueDate: irsaliye tarihi; portala geliş gecikmesi için ± gün penceresi.
- */
-function resolveListDateRange(opts) {
-  if (!opts || typeof opts !== "object") return null;
-  const from = opts.from != null ? String(opts.from).trim().slice(0, 10) : "";
-  const to = opts.to != null ? String(opts.to).trim().slice(0, 10) : "";
-  if (/^\d{4}-\d{2}-\d{2}$/.test(from) && /^\d{4}-\d{2}-\d{2}$/.test(to)) {
-    return { from, to };
-  }
-  const id = parseDespatchIssueDate(opts.issueDate);
-  if (id) {
-    return { from: addDaysYyyyMmDd(id, -14), to: addDaysYyyyMmDd(id, 30) };
-  }
-  return null;
-}
-
-/** gelenBelgeleriListeleExt + IRSALIYE + tarih (geliş veya fatura tarihi) */
-async function listIrsaliyeGelenBelgeleriExt(vknTckn, fromYmd, toYmd) {
-  const gb = yyyyMmDdCompactFromYmd(fromYmd);
-  const bt = yyyyMmDdCompactFromYmd(toYmd);
-  if (!gb || !bt) return [];
-  const base = {
-    vergiTcKimlikNo: String(vknTckn),
-    belgeTuru: "IRSALIYE",
-    sonAlinanBelgeSiraNumarasi: "0",
-    donusTipiVersiyon: "6.0",
-    onayDurum: "HEPSI",
-  };
-  const variants = [
-    { ...base, gelisTarihiBaslangic: gb, gelisTarihiBitis: bt },
-    { ...base, faturaTarihiBaslangic: gb, faturaTarihiBitis: bt },
-  ];
-  for (const parametreler of variants) {
-    try {
-      let listResp;
-      try {
-        listResp = await callConnector("gelenBelgeleriListeleExt", { parametreler });
-      } catch (_) {
-        listResp = await callConnector("gelenBelgeleriListeleExt", parametreler);
-      }
-      const pageItems = normalizeListItems(listResp);
-      if (pageItems.length) {
-        logger.info("listIrsaliyeGelenBelgeleriExt hit", {
-          count: pageItems.length,
-          gelis: !!parametreler.gelisTarihiBaslangic,
-        });
-        return pageItems;
-      }
-    } catch (e) {
-      logger.warn("listIrsaliyeGelenBelgeleriExt variant failed", { err: String(e?.message || e) });
-    }
-  }
-  return [];
 }
 
 /**
@@ -316,8 +234,8 @@ export async function resolveDespatchUblHybrid(vknTckn, belgeNo, opts) {
 
 /**
  * Fatura ile ilişkili irsaliye için portal yolu: belge no + (varsa) irsaliye tarihi ile liste → ETTN → UBL indir.
- * Önce (varsa) irsaliye tarihi / tarih aralığı ile `gelenBelgeleriListeleExt` dener;
- * sonra `gelenBelgeleriListeleNew` sayfaları.
+ * Önce (varsa) irsaliye tarihi / tarih aralığı ile `gelenBelgeleriListeleExt`'i küçük
+ * dilimlerle dener (qnbDespatchPortalLookup.js); sonra `gelenBelgeleriListeleNew` sayfaları.
  * @param {string} vknTckn
  * @param {string} belgeNo
  * @param {{ from?: string, to?: string, issueDate?: string }} [opts] - issueDate: fatura UBL'deki irsaliye IssueDate
@@ -329,22 +247,23 @@ export async function fetchDespatchUblByBelgeNo(vknTckn, belgeNo, opts) {
   let item = null;
   let listError = null;
 
-  const range = resolveListDateRange(opts);
-  if (range) {
-    try {
-      const extItems = await listIrsaliyeGelenBelgeleriExt(vknTckn, range.from, range.to);
-      item = extItems.find((it) => belgeNoKey(itemBelgeNo(it)) === want);
-      if (item) {
-        items = extItems;
-        logger.info("fetchDespatchUblByBelgeNo: eşleşme (gelenBelgeleriListeleExt)", {
-          belgeNo,
-          from: range.from,
-          to: range.to,
-        });
-      }
-    } catch (e) {
-      logger.warn("fetchDespatchUblByBelgeNo Ext list error", { belgeNo, err: String(e?.message || e) });
-    }
+  const found = await findDespatchInPortal(vknTckn, belgeNo, opts || {});
+  if (found.item) {
+    item = found.item;
+    items = [found.item];
+    const hit = found.queries[found.queries.length - 1];
+    logger.info("fetchDespatchUblByBelgeNo: eşleşme (gelenBelgeleriListeleExt)", {
+      belgeNo,
+      by: hit?.by,
+      from: hit?.from,
+      to: hit?.to,
+    });
+  } else if (found.queries.length) {
+    logger.info("fetchDespatchUblByBelgeNo: tarih dilimlerinde bulunamadı", {
+      belgeNo,
+      queries: found.queries.length,
+      err: found.error,
+    });
   }
 
   // Kuyruk listesi (tarih filtresi yok); sayfa başları — eski irsaliyeler için geniş aralık

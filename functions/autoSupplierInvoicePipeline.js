@@ -33,6 +33,7 @@ import {
   readDespatchFromQnbDocs,
   readEttnFromQnbDocsForDespatch,
 } from "./enrichInvoiceWithRelatedDespatches.js";
+import { findDespatchInPortal } from "./qnbDespatchPortalLookup.js";
 
 const db = getFirestore();
 
@@ -50,22 +51,9 @@ const STATE_DOC = db.collection("qnb_sync_state").doc("auto_pipeline");
  */
 const ROLLING_WINDOW_DAYS = 1;
 /**
- * Adım 2 — her irsaliye referansı için issueDate etrafında uygulanan dar pencere.
- * `gelenBelgeleriListeleExt` IRSALIYE çağrısı portalda max ~100 satır döner ve
- * IRSALIYE'de `sonAlinanBelgeSiraNumarasi` pagination çalışmıyor (NPE atıyor).
- * Bu nedenle irsaliye'yi 100 satır limiti içinde garantili bulmak için tarihe
- * göre dar pencerede ayrı ayrı sorgulanır.
- *
- *   pencere = [issueDate - LOOKBEHIND, issueDate + LOOKAHEAD]
- *
- * - LOOKBEHIND: irsaliye portala düzenleme tarihinden bir gün önce de düşmüş
- *   olabilir (saat dilimi/UTC farkı).
- * - LOOKAHEAD: irsaliye düzenleyen tedarikçi belgeyi 1-2 gün geç upload edebilir.
- *   7 günlük yasal fatura kuralı + portal gecikmesi için 5 gün tampon yeterli.
+ * Adım 2 — irsaliye referansında issueDate yoksa kullanılacak yedek geliş penceresi
+ * (gün, today-N → today). Arama planı ve 100 satır sınırı: qnbDespatchPortalLookup.js
  */
-const DESPATCH_ISSUE_LOOKBEHIND_DAYS = 1;
-const DESPATCH_ISSUE_LOOKAHEAD_DAYS = 5;
-/** issueDate bilgisi yoksa kullanılacak yedek pencere (gün, today-N → today). */
 const DESPATCH_FALLBACK_WINDOW_DAYS = 21;
 
 const STEP_BUDGET_MS = {
@@ -139,49 +127,6 @@ function despatchDocIdFromBelgeNo(belgeNo) {
   const safe = String(belgeNo || "").replace(/[/\\]/g, "_").trim();
   if (!safe) return null;
   return `despatch_${safe}`;
-}
-
-/**
- * BelgeNo karşılaştırma anahtarı: portal bazen "BRS 2026 000000074" gibi
- * boşluklu döner, UBL'den "BRS2026000000074" çıkar. Hepsini boşluk/sınırlayıcı
- * temizleyip büyük harfle eşleştirilir.
- */
-function belgeNoKey(s) {
-  if (s == null) return "";
-  return String(s).replace(/[\s.\-/_]/g, "").toUpperCase();
-}
-
-function itemBelgeNo(it) {
-  return (
-    it?.belgeNo ??
-    it?.belgeNoStr ??
-    it?.irsaliyeNo ??
-    it?.belgeNumarasi ??
-    null
-  );
-}
-
-/** issueDate (YYYY-MM-DD veya YYYYMMDD) varsa onun etrafında dar pencere. */
-function safeDespatchSearchWindow(issueDateRaw) {
-  let ymd = null;
-  if (typeof issueDateRaw === "string") {
-    const t = issueDateRaw.trim();
-    if (/^\d{4}-\d{2}-\d{2}/.test(t)) ymd = t.slice(0, 10);
-    else if (/^\d{8}$/.test(t)) {
-      ymd = `${t.slice(0, 4)}-${t.slice(4, 6)}-${t.slice(6, 8)}`;
-    }
-  }
-  if (!ymd) return rollingWindow(DESPATCH_FALLBACK_WINDOW_DAYS);
-  const [y, m, d] = ymd.split("-").map((x) => parseInt(x, 10));
-  const base = new Date(y, m - 1, d);
-  const fromD = new Date(base);
-  fromD.setDate(fromD.getDate() - DESPATCH_ISSUE_LOOKBEHIND_DAYS);
-  const toD = new Date(base);
-  toD.setDate(toD.getDate() + DESPATCH_ISSUE_LOOKAHEAD_DAYS);
-  // Geleceğe taşma: bugünden öteye gitme.
-  const now = new Date();
-  if (toD > now) toD.setTime(now.getTime());
-  return { from: toYyyyMmDd(fromD), to: toYyyyMmDd(toD) };
 }
 
 function normalizeListItems(resp) {
@@ -544,43 +489,10 @@ async function runStep1IngestSupplierInvoices(startedAtMs) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Adım: qnb_invoices'taki her fatura için referansladığı irsaliyeleri,
-// irsaliye düzenleme tarihi etrafında dar pencerede portaldan sorgulayıp
+// 2. Adım: qnb_invoices'taki her fatura için referansladığı irsaliyeleri
+// portalda küçük tarih dilimleriyle arayıp (qnbDespatchPortalLookup.js)
 // qnb_docs'a yazar; ETTN ile UBL'i de indirir.
 // ---------------------------------------------------------------------------
-
-async function findDespatchItemInPortal(vknTckn, belgeNo, issueDateYmd) {
-  const { from, to } = safeDespatchSearchWindow(issueDateYmd);
-  const p = {
-    vergiTcKimlikNo: String(vknTckn),
-    belgeTuru: "IRSALIYE",
-    donusTipiVersiyon: "6.0",
-    gelisTarihiBaslangic: ymdCompact(from),
-    gelisTarihiBitis: ymdCompact(to),
-    onayDurum: "HEPSI",
-  };
-  let listResponse;
-  try {
-    try {
-      listResponse = await callConnector("gelenBelgeleriListeleExt", {
-        parametreler: p,
-      });
-    } catch (_) {
-      listResponse = await callConnector("gelenBelgeleriListeleExt", p);
-    }
-  } catch (e) {
-    return {
-      window: { from, to },
-      error: String(e?.message || e).slice(0, 200),
-      item: null,
-      totalCount: 0,
-    };
-  }
-  const items = normalizeListItems(listResponse);
-  const want = belgeNoKey(belgeNo);
-  const item = items.find((it) => belgeNoKey(itemBelgeNo(it)) === want) || null;
-  return { window: { from, to }, error: null, item, totalCount: items.length };
-}
 
 function buildDespatchPayloadFromPortalItem(it, fallbackBelgeNo) {
   const ettn = it?.ettn || it?.ETTN || null;
@@ -614,12 +526,12 @@ function buildDespatchPayloadFromPortalItem(it, fallbackBelgeNo) {
 /**
  * Tek bir irsaliye referansını işler:
  *   - Geçerli qnb_docs cache varsa atlar.
- *   - Yoksa issueDate etrafında dar pencerede portaldan listeler, eşleştirir.
+ *   - Yoksa portalda belge tarihi / geliş tarihi dilimleriyle arar, eşleştirir.
  *   - Bulunan kaydı qnb_docs'a yazar; ETTN ile UBL'i indirir.
  *
  * @returns {"cachedValid"|"matchedNew"|"notFound"|"portalError"|"ublFailed"|"writtenNoUbl"|"writtenWithUbl"}
  */
-async function processDespatchTarget(vknTckn, belgeNo, issueDateYmd) {
+export async function processDespatchTarget(vknTckn, belgeNo, issueDateYmd) {
   const docId = despatchDocIdFromBelgeNo(belgeNo);
   if (!docId) return "notFound";
 
@@ -633,7 +545,10 @@ async function processDespatchTarget(vknTckn, belgeNo, issueDateYmd) {
     if (hasEttn && hasUbl) return "cachedValid";
   }
 
-  const found = await findDespatchItemInPortal(vknTckn, belgeNo, issueDateYmd);
+  const found = await findDespatchInPortal(vknTckn, belgeNo, {
+    issueDate: issueDateYmd,
+    fallbackWindowDays: DESPATCH_FALLBACK_WINDOW_DAYS,
+  });
   if (found.error) {
     logger.warn("autoPipeline step2 portal listele hatas\u0131", {
       belgeNo,
@@ -792,7 +707,7 @@ async function runStep2SyncDespatches(startedAtMs) {
 // 3. Ad\u0131m: qnb_invoices/{id}/despatches ETTN'lerini qnb_docs'tan yaz
 // ---------------------------------------------------------------------------
 
-async function applyEttnFromQnbDocsForInvoice(invRef) {
+export async function applyEttnFromQnbDocsForInvoice(invRef) {
   const stats = {
     despatchesScanned: 0,
     updated: 0,
@@ -881,7 +796,7 @@ async function runStep3BackfillEttn(startedAtMs) {
 // 4. Ad\u0131m: ETTN'i dolu olan irsaliyelerin UBL'ini despatches'e yaz
 // ---------------------------------------------------------------------------
 
-async function enrichUblForInvoiceDespatches(invRef, vknTckn) {
+export async function enrichUblForInvoiceDespatches(invRef, vknTckn) {
   const stats = {
     despatchesScanned: 0,
     ublWritten: 0,
