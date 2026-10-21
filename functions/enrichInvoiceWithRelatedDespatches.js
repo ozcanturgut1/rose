@@ -14,9 +14,23 @@ import {
 import { ublToFullJson } from "./ublToStructuredJson.js";
 import { requireAuth, requireRole, ROLES_QNB_MUTATE } from "./requireAuth.js";
 import { detectAracGideri, aracGideriUpdateFields } from "./plakaTespit.js";
-import { findDespatchInPortal } from "./qnbDespatchPortalLookup.js";
+import {
+  findDespatchInPortal,
+  belgeNoKey,
+  pickBelgeNoMatch,
+  despatchDocIdCandidates,
+  itemBelgeNo as portalItemBelgeNo,
+} from "./qnbDespatchPortalLookup.js";
 
 const db = getFirestore();
+
+async function firstQnbDocsSnap(belgeNo) {
+  for (const docId of despatchDocIdCandidates(belgeNo)) {
+    const snap = await db.collection("qnb_docs").doc(docId).get();
+    if (snap.exists) return snap;
+  }
+  return null;
+}
 
 const looksLikeDespatchXml = (s) => /^\s*<\?xml|^\s*<(\w+:)?DespatchAdvice\s|^\s*<DespatchAdvice\s/.test((s || "").slice(0, 2048));
 
@@ -67,9 +81,8 @@ function ettnFromQnbDocsData(d) {
  * @returns {Promise<string|null>}
  */
 export async function readEttnFromQnbDocsForDespatch(belgeNo) {
-  const safe = String(belgeNo).replace(/[/\\]/g, "_");
-  const snap = await db.collection("qnb_docs").doc(`despatch_${safe}`).get();
-  if (!snap.exists) return null;
+  const snap = await firstQnbDocsSnap(belgeNo);
+  if (!snap) return null;
   return ettnFromQnbDocsData(snap.data() || {});
 }
 
@@ -89,22 +102,17 @@ function normalizeListItems(resp) {
 }
 
 function itemBelgeNo(it) {
-  const v = it?.belgeNo ?? it?.belgeNoStr ?? it?.belgeNumarasi ?? it?.irsaliyeNo ?? it?.ID ?? it?.id;
+  const v =
+    portalItemBelgeNo(it) ??
+    it?.belgeNumarasi ??
+    it?.ID ??
+    it?.id;
   if (v == null) return null;
   return typeof v === "string" ? v.trim() : String(v).trim();
 }
 
 function itemEttn(it) {
   return it?.ettn ?? it?.ETTN ?? it?.uuid ?? it?.UUID ?? it?.belgeOid ?? it?.externalId ?? it?.id;
-}
-
-/** Boşluk/nokta/tire kaldırarak belge no karşılaştırması (portal "BRS 2026 000000074" dönebilir) */
-function belgeNoKey(s) {
-  return String(s ?? "")
-    .trim()
-    .replace(/\s+/g, "")
-    .replace(/[.-]/g, "")
-    .toUpperCase();
 }
 
 /**
@@ -177,9 +185,8 @@ export async function fetchDespatchUblByEttn(vknTckn, ettn) {
  * @returns {Promise<{ contentUbl: string, ublParsed: object } | null>}
  */
 export async function readDespatchFromQnbDocs(belgeNo) {
-  const safe = String(belgeNo).replace(/[/\\]/g, "_");
-  const snap = await db.collection("qnb_docs").doc(`despatch_${safe}`).get();
-  if (!snap.exists) return null;
+  const snap = await firstQnbDocsSnap(belgeNo);
+  if (!snap) return null;
   const d = snap.data() || {};
   const xml = d.contentUbl;
   if (!xml || typeof xml !== "string" || !looksLikeDespatchXml(xml)) return null;
@@ -194,7 +201,13 @@ export async function readDespatchFromQnbDocs(belgeNo) {
       ublParsed = {};
     }
   }
-  return { contentUbl: xml, ublParsed };
+  const canonical =
+    d.belgeNo != null && String(d.belgeNo).trim() !== ""
+      ? String(d.belgeNo).trim()
+      : d.belgeNoCanonical != null && String(d.belgeNoCanonical).trim() !== ""
+        ? String(d.belgeNoCanonical).trim()
+        : null;
+  return { contentUbl: xml, ublParsed, belgeNoCanonical: canonical };
 }
 
 /**
@@ -211,19 +224,22 @@ export async function resolveDespatchUblHybrid(vknTckn, belgeNo, opts) {
     return fromDoc;
   }
   if (vknTckn) {
-    const safe = String(belgeNo).replace(/[/\\]/g, "_");
-    const snap = await db.collection("qnb_docs").doc(`despatch_${safe}`).get();
-    if (snap.exists) {
+    const snap = await firstQnbDocsSnap(belgeNo);
+    if (snap) {
       const d = snap.data() || {};
       const raw = d.ettn ?? d.qnbRaw?.ettn ?? d.qnbRaw?.ETTN;
       const t = raw ? String(raw).trim() : "";
       if (t && /^[0-9A-Fa-f-]{30,}$/.test(t)) {
         const byEttn = await fetchDespatchUblByEttn(vknTckn, t);
         if (byEttn?.contentUbl) {
+          const canonical =
+            d.belgeNo != null && String(d.belgeNo).trim() !== ""
+              ? String(d.belgeNo).trim()
+              : null;
           logger.info("irsaliye UBL kaynağı=qnb_docs ETTN+gelenIrsaliyeIndir", {
             belgeNo: String(belgeNo).slice(0, 32),
           });
-          return byEttn;
+          return { ...byEttn, ...(canonical ? { belgeNoCanonical: canonical } : {}) };
         }
       }
     }
@@ -242,7 +258,6 @@ export async function resolveDespatchUblHybrid(vknTckn, belgeNo, opts) {
  * @returns {{ contentUbl: string, ublParsed: object } | { errorCode: string, errorDetail?: string } | null}
  */
 export async function fetchDespatchUblByBelgeNo(vknTckn, belgeNo, opts) {
-  const want = belgeNoKey(belgeNo);
   let items = [];
   let item = null;
   let listError = null;
@@ -257,6 +272,7 @@ export async function fetchDespatchUblByBelgeNo(vknTckn, belgeNo, opts) {
       by: hit?.by,
       from: hit?.from,
       to: hit?.to,
+      matchedBelgeNo: itemBelgeNo(item),
     });
   } else if (found.queries.length) {
     logger.info("fetchDespatchUblByBelgeNo: tarih dilimlerinde bulunamadı", {
@@ -286,7 +302,7 @@ export async function fetchDespatchUblByBelgeNo(vknTckn, belgeNo, opts) {
             items.push(it);
           }
         }
-        item = items.find((it) => belgeNoKey(itemBelgeNo(it)) === want);
+        item = pickBelgeNoMatch(items, belgeNo, itemBelgeNo);
         if (item) break;
         if (pageItems.length === 0) break;
       } catch (e) {
@@ -294,12 +310,12 @@ export async function fetchDespatchUblByBelgeNo(vknTckn, belgeNo, opts) {
         logger.warn("enrich irsaliye list (BelgeleriListeleNew) failed", { belgeNo, start, error: String(e?.message || e) });
       }
     }
-    if (!item) item = items.find((it) => belgeNoKey(itemBelgeNo(it)) === want);
+    if (!item) item = pickBelgeNoMatch(items, belgeNo, itemBelgeNo);
   }
   logger.info("enrich irsaliye list toplam aday", { belgeNo, count: items.length, matched: !!item });
 
   if (!item) {
-    logger.warn("enrich irsaliye item not found in list", { belgeNo, want });
+    logger.warn("enrich irsaliye item not found in list", { belgeNo, want: belgeNoKey(belgeNo) });
     if (listError) {
       return { errorCode: "LIST_QUERY_FAILED", errorDetail: listError };
     }
@@ -314,6 +330,14 @@ export async function fetchDespatchUblByBelgeNo(vknTckn, belgeNo, opts) {
     logger.warn("enrich irsaliye ettn missing", { belgeNo });
     return { errorCode: "ETTN_MISSING", errorDetail: "Listede ETTN/UUID yok" };
   }
+
+  const matchedBelgeNo = itemBelgeNo(item);
+  const belgeNoCanonical =
+    matchedBelgeNo && belgeNoKey(matchedBelgeNo) !== belgeNoKey(belgeNo)
+      ? String(matchedBelgeNo).trim()
+      : matchedBelgeNo
+        ? String(matchedBelgeNo).trim()
+        : null;
 
   let raw;
   try {
@@ -356,7 +380,11 @@ export async function fetchDespatchUblByBelgeNo(vknTckn, belgeNo, opts) {
     return { errorCode: "CONTENT_INVALID", errorDetail: "İndirilen içerik irsaliye UBL değil" };
   }
   const ublParsed = ublToFullJson(xml);
-  return { contentUbl: xml, ublParsed: ublParsed ?? {} };
+  return {
+    contentUbl: xml,
+    ublParsed: ublParsed ?? {},
+    ...(belgeNoCanonical ? { belgeNoCanonical } : {}),
+  };
 }
 
 const setCors = (req, res) => {
@@ -499,6 +527,9 @@ export async function enrichOne(docId) {
       if (despatchUbl?.contentUbl) {
         payload.contentUbl = despatchUbl.contentUbl;
         if (despatchUbl?.ublParsed && Object.keys(despatchUbl.ublParsed).length) payload.ublParsed = despatchUbl.ublParsed;
+        if (despatchUbl.belgeNoCanonical) {
+          payload.belgeNoCanonical = String(despatchUbl.belgeNoCanonical).trim();
+        }
         const da = despatchUbl.ublParsed?.DespatchAdvice;
         const rawUuid = da?.UUID ?? da?.Uuid ?? da?.uuid;
         const ettnFromFetched =
@@ -514,7 +545,11 @@ export async function enrichOne(docId) {
       payload.ettn = ettnFromQnbStore;
       ettn = ettnFromQnbStore;
     }
-    relatedDespatchEttns.push({ belgeNo, ettn: payload.ettn || ettn || null });
+    relatedDespatchEttns.push({
+      belgeNo,
+      ...(payload.belgeNoCanonical ? { belgeNoCanonical: payload.belgeNoCanonical } : {}),
+      ettn: payload.ettn || ettn || null,
+    });
     batch.set(despatchCol.doc(despatchDocId), payload, { merge: true });
     batchOpCount++;
   }

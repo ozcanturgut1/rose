@@ -1,9 +1,12 @@
+import 'dart:math' as math;
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
 import '../formatting/display_date.dart';
 import '../services/qnb_api.dart';
 import '../widgets/ara_onay_yonlendir_dialog.dart';
+import '../widgets/muhasebe_fisi_dialog.dart';
 
 String _safeDocKey(String s) => s.replaceAll(RegExp(r'[/\\]'), '_');
 
@@ -83,7 +86,10 @@ String _kalemUblSutunBasligiTr(String anahtar) {
     'Note': 'Satır notu',
     'OrderLineReference/ID': 'Sipariş satır referansı',
     'Item/Description': 'Açıklama',
+    'Item/SellersItemIdentification/ID': 'Satıcı ürün kodu',
     'Item/BuyersItemIdentification/ID': 'Alıcı ürün tanımı',
+    'DeliveredQuantity': 'Teslim miktarı',
+    'OutstandingQuantity': 'Kalan miktar',
     'Item/Name': 'Ürün / hizmet adı',
     'InvoicedQuantity': 'Miktar',
     'Price/PriceAmount': 'Birim fiyat',
@@ -432,6 +438,10 @@ Map<String, String> _flattenBelgeOzetInvoiceLineForTablo(Map<String, dynamic> li
     final im = Map<String, dynamic>.from(item);
     _kalemTabloHucreEkle(out, 'Item/Name', im['Name']?.toString().trim());
     _kalemTabloHucreEkle(out, 'Item/Description', _ublItemDescriptionText(im['Description']));
+    final saticiKod = im['SellersItemIdentification']?.toString().trim();
+    if (saticiKod != null && saticiKod.isNotEmpty) {
+      _kalemTabloHucreEkle(out, 'Item/SellersItemIdentification/ID', saticiKod);
+    }
     final b = im['BuyersItemIdentification']?.toString().trim();
     if (b != null && b.isNotEmpty) {
       _kalemTabloHucreEkle(out, 'Item/BuyersItemIdentification/ID', b);
@@ -494,6 +504,11 @@ Map<String, String> _flattenUblInvoiceLineForTablo(Map<String, dynamic> line, St
     final im = Map<String, dynamic>.from(itemRaw);
     _kalemTabloHucreEkle(out, 'Item/Name', _ublXmlScalarText(im['Name']));
     _kalemTabloHucreEkle(out, 'Item/Description', _ublItemDescriptionText(im['Description']));
+    _kalemTabloHucreEkle(
+      out,
+      'Item/SellersItemIdentification/ID',
+      _ublItemIdentificationId(im['SellersItemIdentification']),
+    );
     _kalemTabloHucreEkle(
       out,
       'Item/BuyersItemIdentification/ID',
@@ -603,19 +618,23 @@ Map<String, String> _flattenUblInvoiceLineForTablo(Map<String, dynamic> line, St
 
 /// Bilinen UBL InvoiceLine yolları için tercih sırası; diğerleri alfabetik sonda.
 int _kalemUblSutunSiralama(String k) {
+  // Basılı e-fatura mal/hizmet tablosu sırası.
   const sira = <String>[
-    'Note',
-    'OrderLineReference/ID',
-    'Item/Description',
-    'Item/BuyersItemIdentification/ID',
     'Item/Name',
+    'Item/Description',
+    'Item/SellersItemIdentification/ID',
+    'Item/BuyersItemIdentification/ID',
+    'DeliveredQuantity',
+    'OutstandingQuantity',
     'InvoicedQuantity',
     'Price/PriceAmount',
-    'LineExtensionAmount',
     'AllowanceCharge',
-    'TaxTotal/TaxAmount',
     'TaxTotal/TaxSubtotal/Percent',
+    'TaxTotal/TaxAmount',
+    'LineExtensionAmount',
     'TaxTotal/TaxSubtotal/TaxCategory/TaxScheme/TaxTypeCode',
+    'Note',
+    'OrderLineReference/ID',
   ];
   final i = sira.indexOf(k);
   if (i >= 0) return i;
@@ -641,6 +660,8 @@ List<String> _kalemUblSutunAnahtarlari(List<Map<String, dynamic>> satirlar) {
 
 TextAlign _kalemUblSutunHizasi(String anahtar) {
   if (anahtar == 'InvoicedQuantity' ||
+      anahtar == 'DeliveredQuantity' ||
+      anahtar == 'OutstandingQuantity' ||
       anahtar.contains('Amount') ||
       anahtar.contains('Percent') ||
       anahtar.contains('TaxTypeCode')) {
@@ -655,6 +676,35 @@ double _kalemDinamikSutunGenisligi(String anahtar) {
   }
   final base = 72.0 + anahtar.length * 4.2;
   return base.clamp(88.0, 240.0);
+}
+
+void _hucreleriDoldur(Map<String, dynamic> row, Map<String, String> ekstra) {
+  final mevcut = row['_ublHucreleri'];
+  final base = <String, String>{};
+  if (mevcut is Map) {
+    mevcut.forEach((k, v) {
+      final t = v?.toString().trim() ?? '';
+      if (t.isNotEmpty) base[k.toString()] = t;
+    });
+  }
+  for (final e in ekstra.entries) {
+    if ((base[e.key] ?? '').isEmpty && e.value.trim().isNotEmpty) {
+      base[e.key] = e.value.trim();
+    }
+  }
+  row['_ublHucreleri'] = base;
+}
+
+List<Map<String, dynamic>> _invoiceUblLineMaps(Map<String, dynamic> data) {
+  final inv = _invoiceUblNode(data);
+  if (inv == null) return [];
+  final linesRaw = inv['InvoiceLine'];
+  if (linesRaw == null) return [];
+  if (linesRaw is List) {
+    return linesRaw.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+  }
+  if (linesRaw is Map) return [Map<String, dynamic>.from(linesRaw)];
+  return [];
 }
 
 List<Map<String, dynamic>> _faturaKalemleri(Map<String, dynamic> data) {
@@ -690,6 +740,10 @@ List<Map<String, dynamic>> _faturaKalemleri(Map<String, dynamic> data) {
             r['satirParaBirimi'] = docCur;
           }
         }
+      }
+      final ublLines = _invoiceUblLineMaps(data);
+      for (var i = 0; i < rows.length && i < ublLines.length; i++) {
+        _hucreleriDoldur(rows[i], _flattenUblInvoiceLineForTablo(ublLines[i], docCur));
       }
       return rows;
     }
@@ -869,7 +923,57 @@ Map<String, dynamic> _kalemDespatchBelgeOzet(Map<String, dynamic> line) {
     if (satirAcik != null && satirAcik.isNotEmpty) 'satirAciklama': satirAcik,
     if (miktar != null) 'miktar': miktar,
     if (birim != null && birim.isNotEmpty) 'birim': birim,
+    '_ublHucreleri': _despatchSatirHucreleri(line),
   };
+}
+
+Map<String, String> _despatchSatirHucreleri(Map<String, dynamic> line) {
+  final out = <String, String>{};
+  final item = line['Item'];
+  if (item is Map) {
+    final im = Map<String, dynamic>.from(item);
+    _kalemTabloHucreEkle(
+      out,
+      'Item/Name',
+      im['Name']?.toString().trim().isNotEmpty == true
+          ? im['Name']?.toString()
+          : _ublXmlScalarText(im['Name']),
+    );
+    _kalemTabloHucreEkle(
+      out,
+      'Item/Description',
+      _ublItemDescriptionText(im['Description']) ?? im['Description']?.toString(),
+    );
+    _kalemTabloHucreEkle(
+      out,
+      'Item/SellersItemIdentification/ID',
+      _ublItemIdentificationId(im['SellersItemIdentification']) ??
+          im['SellersItemIdentification']?.toString(),
+    );
+  }
+  final notes = _ublInvoiceLineNotes(line['Note']);
+  if (notes.isNotEmpty) {
+    _kalemTabloHucreEkle(out, 'Note', notes.join(' | '));
+  }
+  void miktarAlani(String anahtar, dynamic qty, String? yedekBirim) {
+    if (qty == null && (yedekBirim == null || yedekBirim.isEmpty)) return;
+    String metin = '';
+    String? birim = yedekBirim;
+    if (qty is Map) {
+      final qm = Map<String, dynamic>.from(qty);
+      metin = _ublXmlScalarText(qm)?.trim() ?? '';
+      birim = (qm['@_unitCode'] ?? qm['@_UnitCode'])?.toString() ?? birim;
+    } else if (qty != null) {
+      metin = qty.toString().trim();
+    }
+    if (metin.isEmpty) return;
+    if (birim != null && birim.trim().isNotEmpty) metin = '$metin ${birim.trim()}';
+    _kalemTabloHucreEkle(out, anahtar, metin);
+  }
+
+  miktarAlani('DeliveredQuantity', line['DeliveredQuantity'], line['unitCode']?.toString());
+  miktarAlani('OutstandingQuantity', line['OutstandingQuantity'], null);
+  return out;
 }
 
 List<Map<String, dynamic>> _irsaliyeKalemleri(Map<String, dynamic> data) {
@@ -889,7 +993,11 @@ List<Map<String, dynamic>> _irsaliyeKalemleri(Map<String, dynamic> data) {
       }
     }
     if (rows.isNotEmpty) {
-      _irsaliyeKalemlerineSatirAciklamasiEkle(rows, _irsaliyeUblDespatchLines(data));
+      final ublLines = _irsaliyeUblDespatchLines(data);
+      _irsaliyeKalemlerineSatirAciklamasiEkle(rows, ublLines);
+      for (var i = 0; i < rows.length && i < ublLines.length; i++) {
+        _hucreleriDoldur(rows[i], _despatchSatirHucreleri(ublLines[i]));
+      }
       return rows;
     }
   }
@@ -920,6 +1028,7 @@ List<Map<String, dynamic>> _irsaliyeKalemleri(Map<String, dynamic> data) {
       if (satirAcik != null && satirAcik.isNotEmpty) 'satirAciklama': satirAcik,
       if (miktar != null) 'miktar': miktar,
       if (birim != null && birim.isNotEmpty) 'birim': birim,
+      '_ublHucreleri': _despatchSatirHucreleri(line),
     });
   }
   return out;
@@ -1026,7 +1135,12 @@ String? _documentCurrencyFromInvoice(Map<String, dynamic> data) {
       if (c != null && c.isNotEmpty) return c;
     }
   }
-  return null;
+  final q = data['qnbRaw'];
+  if (q is Map) {
+    final c = Map<String, dynamic>.from(q)['odenecekTutarDovizCinsi']?.toString().trim();
+    if (c != null && c.isNotEmpty) return c;
+  }
+  return data['odenecekTutarDovizCinsi']?.toString().trim();
 }
 
 String _tutarListStr(Map<String, dynamic> data) {
@@ -1048,6 +1162,383 @@ String? _supplierVknStr(Map<String, dynamic> d) {
     if (g != null && g.isNotEmpty) return g;
   }
   return null;
+}
+
+String _joinNonEmpty(Iterable<String?> parts, [String sep = ', ']) {
+  return parts.map((e) => e?.trim() ?? '').where((e) => e.isNotEmpty).join(sep);
+}
+
+Map<String, dynamic>? _belgeOzetMap(Map<String, dynamic> data) {
+  final bo = data['belgeOzet'];
+  if (bo is Map) return Map<String, dynamic>.from(bo);
+  return null;
+}
+
+Map<String, dynamic>? _invoiceUblNode(Map<String, dynamic> data) {
+  final up = data['ublParsed'];
+  if (up is! Map) return null;
+  final inv = _ublFirst(Map<String, dynamic>.from(up)['Invoice']);
+  if (inv is Map) return Map<String, dynamic>.from(inv);
+  return null;
+}
+
+Map<String, dynamic>? _despatchUblNode(Map<String, dynamic> data) {
+  final up = data['ublParsed'];
+  if (up is! Map) return null;
+  final da = _ublFirst(Map<String, dynamic>.from(up)['DespatchAdvice']);
+  if (da is Map) return Map<String, dynamic>.from(da);
+  return null;
+}
+
+String _faturaSenaryoEtiket(String raw) {
+  switch (raw.trim().toUpperCase()) {
+    case 'TEMELFATURA':
+      return 'Temel Fatura';
+    case 'TICARIFATURA':
+      return 'Ticari Fatura';
+    case 'EARSIVFATURA':
+      return 'e-Arşiv Fatura';
+    case 'IHRACAT':
+      return 'İhracat';
+    case 'YOLCUBERABERFATURA':
+      return 'Yolcu Beraber';
+    case 'KAMU':
+      return 'Kamu';
+    case 'HKS':
+      return 'HKS';
+    case 'ENERJI':
+      return 'Enerji';
+    default:
+      return raw.trim();
+  }
+}
+
+String _faturaTipEtiket(String raw) {
+  switch (raw.trim().toUpperCase()) {
+    case 'SATIS':
+      return 'Satış';
+    case 'IADE':
+      return 'İade';
+    case 'TEVKIFAT':
+      return 'Tevkifat';
+    case 'ISTISNA':
+      return 'İstisna';
+    case 'OZELMATRAH':
+      return 'Özel Matrah';
+    case 'IHRACKAYITLI':
+      return 'İhraç Kayıtlı';
+    case 'SGK':
+      return 'SGK';
+    default:
+      return raw.trim();
+  }
+}
+
+String _irsaliyeSenaryoEtiket(String raw) {
+  switch (raw.trim().toUpperCase()) {
+    case 'TEMELIRSALIYE':
+      return 'Temel İrsaliye';
+    case 'HKSIRSALIYE':
+      return 'HKS İrsaliye';
+    default:
+      return raw.trim();
+  }
+}
+
+String _saatMetni(String raw) {
+  final t = raw.trim();
+  if (t.isEmpty) return '';
+  final m = RegExp(r'^(\d{2}):(\d{2})').firstMatch(t);
+  if (m != null) return '${m.group(1)}:${m.group(2)}';
+  return t;
+}
+
+String _adresMetni(dynamic adres) {
+  if (adres == null) return '';
+  if (adres is String) return adres.trim();
+  if (adres is! Map) return '';
+  final a = Map<String, dynamic>.from(adres);
+  String? country;
+  final c = a['Country'];
+  if (c is Map) {
+    country = _ublXmlScalarText(Map<String, dynamic>.from(c)['Name']) ?? c['Name']?.toString();
+  } else {
+    country = c?.toString();
+  }
+  String? alan(String k) {
+    final v = a[k];
+    if (v is Map) return _ublXmlScalarText(v);
+    return v?.toString();
+  }
+
+  return _joinNonEmpty([
+    alan('StreetName'),
+    alan('BuildingName'),
+    alan('BuildingNumber'),
+    alan('Room'),
+    alan('CitySubdivisionName'),
+    alan('CityName'),
+    alan('PostalZone'),
+    alan('Region'),
+    country,
+  ]);
+}
+
+bool _tarafDolu(Map<String, String> t) => t.values.any((v) => v.trim().isNotEmpty);
+
+Map<String, String>? _tarafFromBelgeOzetNode(dynamic raw) {
+  if (raw is! Map) return null;
+  final m = Map<String, dynamic>.from(raw);
+  final vkn = m['VKN']?.toString().trim() ?? '';
+  final tckn = m['TCKN']?.toString().trim() ?? '';
+  var kimlik = '';
+  if (vkn.isNotEmpty) {
+    kimlik = 'VKN $vkn';
+  } else if (tckn.isNotEmpty) {
+    kimlik = 'TCKN $tckn';
+  }
+  final t = <String, String>{
+    'unvan': m['Unvan']?.toString().trim() ?? '',
+    'kimlik': kimlik,
+    'vergiDairesi': m['VergiDairesi']?.toString().trim() ?? '',
+    'adres': _adresMetni(m['Adres']),
+    'telefon': m['Telefon']?.toString().trim() ?? '',
+    'eposta': m['ElectronicMail']?.toString().trim() ?? '',
+  };
+  return _tarafDolu(t) ? t : null;
+}
+
+Map<String, String>? _tarafFromUblParty(dynamic partyNode) {
+  final first = _ublFirst(partyNode);
+  if (first is! Map) return null;
+  var p = Map<String, dynamic>.from(first);
+  if (p['Party'] != null) {
+    final inner = _ublFirst(p['Party']);
+    if (inner is Map) p = Map<String, dynamic>.from(inner);
+  }
+  var unvan = '';
+  final pn = _ublFirst(p['PartyName']);
+  if (pn is Map) unvan = _ublXmlScalarText(Map<String, dynamic>.from(pn)['Name']) ?? '';
+  if (unvan.isEmpty) {
+    final person = _ublFirst(p['Person']);
+    if (person is Map) {
+      final pm = Map<String, dynamic>.from(person);
+      unvan = _joinNonEmpty([
+        _ublXmlScalarText(pm['FirstName']),
+        _ublXmlScalarText(pm['FamilyName']),
+      ], ' ');
+    }
+  }
+  var kimlik = '';
+  final idsRaw = p['PartyIdentification'];
+  final ids = idsRaw is List ? idsRaw : (idsRaw != null ? [idsRaw] : <dynamic>[]);
+  for (final idn in ids) {
+    if (idn is! Map) continue;
+    final idNode = _ublFirst(Map<String, dynamic>.from(idn)['ID']);
+    String? scheme;
+    String? value;
+    if (idNode is Map) {
+      final idm = Map<String, dynamic>.from(idNode);
+      scheme = (idm['@_schemeID'] ?? idm['@_SchemeID'])?.toString();
+      value = _ublXmlScalarText(idm);
+    } else {
+      value = idNode?.toString();
+    }
+    final v = value?.trim() ?? '';
+    if (v.isEmpty) continue;
+    final sch = (scheme ?? '').trim().toUpperCase();
+    kimlik = sch.isNotEmpty ? '$sch $v' : v;
+    if (sch == 'VKN' || sch == 'TCKN') break;
+  }
+  var vergiDairesi = '';
+  final pts = _ublFirst(p['PartyTaxScheme']);
+  if (pts is Map) {
+    final ts = _ublFirst(Map<String, dynamic>.from(pts)['TaxScheme']);
+    if (ts is Map) {
+      vergiDairesi = _ublXmlScalarText(Map<String, dynamic>.from(ts)['Name']) ?? '';
+    }
+  }
+  final adres = _adresMetni(_ublFirst(p['PostalAddress']));
+  var telefon = '';
+  var eposta = '';
+  final contact = _ublFirst(p['Contact']);
+  if (contact is Map) {
+    final cm = Map<String, dynamic>.from(contact);
+    telefon = _ublXmlScalarText(cm['Telephone']) ?? '';
+    eposta = _ublXmlScalarText(cm['ElectronicMail']) ?? '';
+  }
+  final t = <String, String>{
+    'unvan': unvan,
+    'kimlik': kimlik,
+    'vergiDairesi': vergiDairesi,
+    'adres': adres,
+    'telefon': telefon,
+    'eposta': eposta,
+  };
+  return _tarafDolu(t) ? t : null;
+}
+
+String _ozetAlan(Map<String, dynamic>? bb, Map<String, dynamic>? ubl, String key) {
+  final a = bb?[key]?.toString().trim() ?? '';
+  if (a.isNotEmpty) return a;
+  if (ubl == null) return '';
+  return _ublXmlScalarText(ubl[key])?.trim() ?? '';
+}
+
+Map<String, String> _faturaBaslikAlanlari(Map<String, dynamic> invData) {
+  final bo = _belgeOzetMap(invData);
+  final bb = bo?['belgeBilgileri'] is Map
+      ? Map<String, dynamic>.from(bo!['belgeBilgileri'] as Map)
+      : null;
+  final inv = _invoiceUblNode(invData);
+  final ettnDoc = invData['ettn']?.toString().trim() ?? '';
+  final ettn = _ozetAlan(bb, inv, 'UUID');
+  return <String, String>{
+    'senaryo': _faturaSenaryoEtiket(_ozetAlan(bb, inv, 'ProfileID')),
+    'faturaTipi': _faturaTipEtiket(_ozetAlan(bb, inv, 'InvoiceTypeCode')),
+    'saat': _saatMetni(_ozetAlan(bb, inv, 'IssueTime')),
+    'paraBirimi': _ozetAlan(bb, inv, 'DocumentCurrencyCode'),
+    'ettn': ettn.isNotEmpty ? ettn : ettnDoc,
+  };
+}
+
+Map<String, String> _faturaSatici(Map<String, dynamic> invData) {
+  final fromBo = _tarafFromBelgeOzetNode(_belgeOzetMap(invData)?['tedarikci']);
+  if (fromBo != null) return fromBo;
+  final fromUbl = _tarafFromUblParty(_invoiceUblNode(invData)?['AccountingSupplierParty']);
+  if (fromUbl != null) return fromUbl;
+  final vkn = _supplierVknStr(invData);
+  return <String, String>{
+    'unvan': _gonderenUnvani(invData),
+    'kimlik': (vkn == null || vkn.isEmpty) ? '' : 'VKN $vkn',
+    'vergiDairesi': '',
+    'adres': '',
+    'telefon': '',
+    'eposta': '',
+  };
+}
+
+Map<String, String> _faturaAlici(Map<String, dynamic> invData) {
+  return _tarafFromBelgeOzetNode(_belgeOzetMap(invData)?['musteri']) ??
+      _tarafFromUblParty(_invoiceUblNode(invData)?['AccountingCustomerParty']) ??
+      <String, String>{
+        'unvan': '',
+        'kimlik': '',
+        'vergiDairesi': '',
+        'adres': '',
+        'telefon': '',
+        'eposta': '',
+      };
+}
+
+List<Map<String, String>> _faturaReferanslari(Map<String, dynamic> invData) {
+  final out = <Map<String, String>>[];
+  void add(String etiket, String deger) {
+    final d = deger.trim();
+    if (d.isEmpty || d == '—') return;
+    out.add({'etiket': etiket, 'deger': d});
+  }
+
+  final bo = _belgeOzetMap(invData);
+  if (bo != null) {
+    final sip = bo['siparisReferansi'];
+    if (sip is Map) {
+      final or = Map<String, dynamic>.from(sip)['OrderReference'];
+      if (or is Map) {
+        final om = Map<String, dynamic>.from(or);
+        add('Sipariş no', om['ID']?.toString() ?? '');
+        final dt = om['IssueDate']?.toString() ?? '';
+        if (dt.trim().isNotEmpty) add('Sipariş tarihi', formatTurkishDate(dt, empty: ''));
+      }
+    }
+    final ir = bo['irsaliyeReferansi'];
+    if (ir is Map) {
+      final irm = Map<String, dynamic>.from(ir);
+      final refs = <Map<String, dynamic>>[];
+      final list = irm['DespatchDocumentReferenceList'];
+      if (list is List) {
+        for (final e in list) {
+          if (e is Map) refs.add(Map<String, dynamic>.from(e));
+        }
+      }
+      if (refs.isEmpty && irm['DespatchDocumentReference'] is Map) {
+        refs.add(Map<String, dynamic>.from(irm['DespatchDocumentReference'] as Map));
+      }
+      for (final r in refs) {
+        final id = r['ID']?.toString().trim() ?? '';
+        final dt = r['IssueDate']?.toString().trim() ?? '';
+        final tarih = dt.isEmpty ? '' : formatTurkishDate(dt, empty: '');
+        add('İrsaliye no', tarih.isEmpty ? id : '$id ($tarih)');
+      }
+    }
+    final donem = bo['donem'];
+    if (donem is Map) {
+      final ip = Map<String, dynamic>.from(donem)['InvoicePeriod'];
+      if (ip is Map) {
+        final ipm = Map<String, dynamic>.from(ip);
+        final a = ipm['StartDate']?.toString().trim() ?? '';
+        final b = ipm['EndDate']?.toString().trim() ?? '';
+        if (a.isNotEmpty || b.isNotEmpty) {
+          add(
+            'Fatura dönemi',
+            '${a.isEmpty ? '—' : formatTurkishDate(a)} – ${b.isEmpty ? '—' : formatTurkishDate(b)}',
+          );
+        }
+      }
+    }
+  }
+  return out;
+}
+
+Map<String, String> _irsaliyeBaslikAlanlari(Map<String, dynamic> dd) {
+  final bo = _belgeOzetMap(dd);
+  final bb = bo?['belgeBilgileri'] is Map
+      ? Map<String, dynamic>.from(bo!['belgeBilgileri'] as Map)
+      : null;
+  final da = _despatchUblNode(dd);
+  final ettnDoc = dd['ettn']?.toString().trim() ?? '';
+  final ettn = _ozetAlan(bb, da, 'UUID');
+  return <String, String>{
+    'senaryo': _irsaliyeSenaryoEtiket(_ozetAlan(bb, da, 'ProfileID')),
+    'saat': _saatMetni(_ozetAlan(bb, da, 'IssueTime')),
+    'ettn': ettn.isNotEmpty ? ettn : ettnDoc,
+  };
+}
+
+Map<String, String> _irsaliyeSevk(Map<String, dynamic> dd) {
+  final out = <String, String>{'tarih': '', 'adres': ''};
+  final teslim = _belgeOzetMap(dd)?['teslimat'];
+  if (teslim is Map) {
+    final t = Map<String, dynamic>.from(teslim);
+    final tarih = t['ActualDeliveryDate']?.toString().trim() ?? '';
+    final saat = _saatMetni(t['ActualDeliveryTime']?.toString() ?? '');
+    if (tarih.isNotEmpty) {
+      out['tarih'] = saat.isEmpty
+          ? formatTurkishDate(tarih)
+          : '${formatTurkishDate(tarih)} $saat';
+    }
+    out['adres'] = _adresMetni(t['DeliveryAddress']);
+  }
+  if (out['tarih']!.isEmpty || out['adres']!.isEmpty) {
+    final da = _despatchUblNode(dd);
+    final del = da == null ? null : _ublFirst(da['Delivery']);
+    if (del is Map) {
+      final dm = Map<String, dynamic>.from(del);
+      if (out['tarih']!.isEmpty) {
+        final tarih = _ublXmlScalarText(dm['ActualDeliveryDate']) ?? '';
+        final saat = _saatMetni(_ublXmlScalarText(dm['ActualDeliveryTime']) ?? '');
+        if (tarih.trim().isNotEmpty) {
+          out['tarih'] = saat.isEmpty
+              ? formatTurkishDate(tarih)
+              : '${formatTurkishDate(tarih)} $saat';
+        }
+      }
+      if (out['adres']!.isEmpty) {
+        out['adres'] = _adresMetni(_ublFirst(dm['DeliveryAddress']));
+      }
+    }
+  }
+  return out;
 }
 
 /// UBL / belgeOzet fatura notları (onay açıklamalarından ayrı).
@@ -1091,65 +1582,303 @@ List<String> _faturaBelgeNotlari(Map<String, dynamic> data) {
   return out.where((s) => seen.add(s)).toList();
 }
 
-/// Ödenecek + varsa QNB / UBL tutar satırları (ek sorgu yok).
-List<String> _tutarOzetiSatirlari(Map<String, dynamic> invData) {
-  final lines = <String>[];
-  final od = _tutarListStr(invData);
-  if (od != '—') {
-    lines.add('Ödenecek tutar: $od');
+bool _tryParaBirimi(String? code) {
+  final u = (code ?? '').trim().toUpperCase();
+  return u == 'TRY' || u == 'TL' || u == 'TRL';
+}
+
+/// 1 birim belge dövizi = kaç TL. Kaynak: faturada duran kur (ek sorgu yok).
+({num rate, String source})? _tlKuru(Map<String, dynamic> invData, String? docCur) {
+  final doc = (docCur ?? '').trim().toUpperCase();
+  if (_tryParaBirimi(doc)) return null;
+
+  ({num rate, String source})? fromNode(dynamic node) {
+    final first = _ublFirst(node);
+    if (first is! Map) return null;
+    final m = Map<String, dynamic>.from(first);
+    final rate = _asNum(_ublXmlScalarText(m['CalculationRate']) ?? m['CalculationRate'] ?? m['Rate']);
+    if (rate == null || rate <= 0) return null;
+    final src = (_ublXmlScalarText(m['SourceCurrencyCode']) ?? '').trim().toUpperCase();
+    final tgt = (_ublXmlScalarText(m['TargetCurrencyCode']) ?? '').trim().toUpperCase();
+    if (doc.isNotEmpty && src.isNotEmpty && src != doc && !_tryParaBirimi(src)) return null;
+    if (tgt.isNotEmpty && !_tryParaBirimi(tgt)) {
+      if (_tryParaBirimi(src) && tgt == doc) {
+        return (rate: 1 / rate, source: 'ubl');
+      }
+      return null;
+    }
+    return (rate: rate, source: 'ubl');
   }
 
+  final inv = _invoiceUblNode(invData);
+  if (inv != null) {
+    for (final key in ['PricingExchangeRate', 'PaymentExchangeRate', 'TaxExchangeRate']) {
+      final found = fromNode(inv[key]);
+      if (found != null) return found;
+    }
+  }
   final q = invData['qnbRaw'];
   if (q is Map) {
-    final qm = Map<String, dynamic>.from(q);
-    final pb = qm['odenecekTutarDovizCinsi']?.toString().trim() ?? '';
-    final cur = pb.isEmpty ? null : pb;
-    final mal = _asNum(qm['malHizmetToplamTutari']);
-    final kdv = _asNum(qm['kdvToplamTutari']);
-    if (mal != null) {
-      lines.add('Mal/hizmet toplamı: ${_formatMoney(mal, currency: cur)}');
-    }
-    if (kdv != null) {
-      lines.add('KDV toplamı: ${_formatMoney(kdv, currency: cur)}');
+    final n = _asNum(Map<String, dynamic>.from(q)['dovizKuru']);
+    if (n != null && n > 0) return (rate: n, source: 'qnb');
+  }
+  return null;
+}
+
+/// PDF/XSLT ile aynı kaynak: AdditionalDocumentReference içindeki TL toplamlar.
+({num? mal, num? iskonto, num? vergiHaric, num? kdv, num? vergiDahil, num? odenecek})? _belgedekiTlToplamlari(
+  Map<String, dynamic> invData,
+) {
+  final refs = <dynamic>[];
+  void ekleRef(dynamic raw) {
+    if (raw == null) return;
+    if (raw is List) {
+      refs.addAll(raw);
+    } else {
+      refs.add(raw);
     }
   }
 
-  final bo = invData['belgeOzet'];
-  if (bo is Map) {
-    final bom = Map<String, dynamic>.from(bo);
-    final docCur = _documentCurrencyFromInvoice(invData);
-    final top = bom['toplamlar'];
-    if (top is Map) {
-      final t = Map<String, dynamic>.from(top);
-      final curRaw = t['currencyID']?.toString().trim() ?? '';
-      final cur = curRaw.isNotEmpty ? curRaw : docCur;
-      void add(String label, String key) {
-        final n = _asNum(t[key]);
-        if (n != null) {
-          lines.add('$label: ${_formatMoney(n, currency: cur)}');
-        }
-      }
-
-      add('Satır toplamı (UBL)', 'LineExtensionAmount');
-      add('Vergi matrahı (UBL)', 'TaxExclusiveAmount');
-      add('Vergi dahil toplam (UBL)', 'TaxInclusiveAmount');
-      add('Ödenecek (UBL)', 'PayableAmount');
+  final inv = _invoiceUblNode(invData);
+  if (inv != null) ekleRef(inv['AdditionalDocumentReference']);
+  ekleRef(_belgeOzetMap(invData)?['AdditionalDocumentReference']);
+  num? mal;
+  num? iskonto;
+  num? vergiHaric;
+  num? kdv;
+  num? vergiDahil;
+  num? odenecek;
+  var any = false;
+  for (final raw in refs) {
+    if (raw is! Map) continue;
+    final m = Map<String, dynamic>.from(raw);
+    final typ = (_ublXmlScalarText(m['DocumentType']) ?? m['DocumentType']?.toString() ?? '')
+        .trim()
+        .toUpperCase();
+    final kod = (_ublXmlScalarText(m['DocumentTypeCode']) ?? m['DocumentTypeCode']?.toString() ?? '')
+        .trim()
+        .toUpperCase();
+    final desc =
+        (_ublXmlScalarText(m['DocumentDescription']) ?? m['DocumentDescription']?.toString() ?? '')
+            .trim()
+            .toUpperCase();
+    final id = _asNum(_ublXmlScalarText(m['ID']) ?? m['ID']);
+    final aciklamaTutar = _asNum(_ublXmlScalarText(m['DocumentDescription']) ?? m['DocumentDescription']);
+    num? tutar = id;
+    if (aciklamaTutar != null && aciklamaTutar > 0 && (tutar == null || tutar <= 0 || (tutar < 100 && aciklamaTutar > tutar))) {
+      tutar = aciklamaTutar;
     }
-    final vergi = bom['vergi'];
+    if (tutar == null || tutar <= 0) continue;
+    final anahtar = typ.isNotEmpty ? typ : kod;
+    if (anahtar == 'LINEEXTENSIONAMOUNT') {
+      mal = tutar;
+    } else if (anahtar == 'ALLOWANCETOTALAMOUNT') {
+      iskonto = tutar;
+    } else if (anahtar == 'TAXEXCLUSIVEAMOUNT') {
+      vergiHaric = tutar;
+    } else if (anahtar == 'TAXINCLUSIVEAMOUNT') {
+      vergiDahil = tutar;
+    } else if (anahtar == 'PAYABLEAMOUNT') {
+      odenecek = tutar;
+    } else if (desc == 'KDV' || anahtar == 'TAXAMOUNT' || anahtar == 'KDV') {
+      kdv = tutar;
+    } else {
+      continue;
+    }
+    any = true;
+  }
+  if (!any) return null;
+  return (
+    mal: mal,
+    iskonto: iskonto,
+    vergiHaric: vergiHaric,
+    kdv: kdv,
+    vergiDahil: vergiDahil,
+    odenecek: odenecek,
+  );
+}
+
+String _tutarSatiri(
+  String label,
+  num amount,
+  String? cur,
+  ({num rate, String source})? kur, {
+  String ek = '',
+  num? tl,
+}) {
+  final c = cur?.trim() ?? '';
+  final ana = _formatMoney(amount, currency: c.isEmpty ? null : c);
+  var line = '$label: $ana';
+  if (ek.trim().isNotEmpty) line = '$line ${ek.trim()}';
+  if (_tryParaBirimi(c)) return line;
+  final tlTutar = tl ?? (kur == null ? null : amount * kur.rate);
+  if (tlTutar != null) {
+    line = '$line    ·    ${_formatMoney(tlTutar, currency: 'TL')}';
+  }
+  return line;
+}
+
+/// Basılı e-fatura dip toplam sırası.
+/// TL önce belgedeki AdditionalDocumentReference tutarından, yoksa kurdan.
+List<String> _tutarOzetiSatirlari(Map<String, dynamic> invData) {
+  final lines = <String>[];
+  final bo = _belgeOzetMap(invData);
+  final docCur = _documentCurrencyFromInvoice(invData);
+  final kur = _tlKuru(invData, docCur);
+  final tlBelge = _belgedekiTlToplamlari(invData);
+  if (kur != null) {
+    final kaynak = (docCur ?? '').trim().isEmpty ? 'döviz' : docCur!.trim().toUpperCase();
+    lines.add(
+      'Döviz kuru: 1 $kaynak = ${_formatTurkishAmount(kur.rate, fractionDigits: 4)} TL',
+    );
+  }
+  num? tlAlan(String key) {
+    if (tlBelge == null) return null;
+    switch (key) {
+      case 'LineExtensionAmount':
+        return tlBelge.mal;
+      case 'AllowanceTotalAmount':
+        return tlBelge.iskonto;
+      case 'TaxExclusiveAmount':
+        return tlBelge.vergiHaric;
+      case 'TaxInclusiveAmount':
+        return tlBelge.vergiDahil;
+      case 'PayableAmount':
+        return tlBelge.odenecek;
+      default:
+        return null;
+    }
+  }
+
+  var structured = false;
+  if (bo != null && bo['toplamlar'] is Map) {
+    final t = Map<String, dynamic>.from(bo['toplamlar'] as Map);
+    final curRaw = t['currencyID']?.toString().trim() ?? '';
+    final cur = curRaw.isNotEmpty ? curRaw : docCur;
+    void add(String label, String key) {
+      final n = _asNum(t[key]);
+      if (n == null) return;
+      if (key == 'AllowanceTotalAmount' && n == 0) return;
+      lines.add(_tutarSatiri(label, n, cur, kur, tl: tlAlan(key)));
+      structured = true;
+    }
+
+    add('Mal hizmet toplam tutarı', 'LineExtensionAmount');
+    add('Toplam iskonto', 'AllowanceTotalAmount');
+    add('Vergi hariç toplam', 'TaxExclusiveAmount');
+
+    final vergi = bo['vergi'];
     if (vergi is Map) {
       final v = Map<String, dynamic>.from(vergi);
-      final n = _asNum(v['TaxAmount']);
+      final vCurRaw = v['currencyID']?.toString().trim() ?? '';
+      final vCur = vCurRaw.isNotEmpty ? vCurRaw : cur;
+      final subsRaw = v['TaxSubtotal'];
+      final subs = subsRaw is List ? subsRaw : (subsRaw != null ? [subsRaw] : <dynamic>[]);
+      final taxRows = <Map<String, dynamic>>[];
+      for (final s in subs) {
+        if (s is! Map) continue;
+        final sm = Map<String, dynamic>.from(s);
+        if (_asNum(sm['TaxAmount']) == null) continue;
+        taxRows.add(sm);
+      }
+      final tekVergi = taxRows.length == 1;
+      var wroteSub = false;
+      for (final sm in taxRows) {
+        final taxAmt = _asNum(sm['TaxAmount']);
+        if (taxAmt == null) continue;
+        final percent = _asNum(sm['Percent']);
+        final matrah = _asNum(sm['TaxableAmount']);
+        var name = 'Hesaplanan KDV';
+        final scheme = sm['TaxScheme'];
+        if (scheme is Map) {
+          final n = Map<String, dynamic>.from(scheme)['Name']?.toString().trim();
+          if (n != null && n.isNotEmpty) name = n;
+        }
+        final oran = percent == null ? '' : ' %${_formatTurkishAmount(percent, fractionDigits: 0)}';
+        var mat = '';
+        if (matrah != null) {
+          mat = '(matrah ${_formatMoney(matrah, currency: vCur)}';
+          if (!_tryParaBirimi(vCur)) {
+            final matrahTl = tlBelge?.vergiHaric ?? (kur == null ? null : matrah * kur.rate);
+            if (matrahTl != null) {
+              mat = '$mat / ${_formatMoney(matrahTl, currency: 'TL')}';
+            }
+          }
+          mat = '$mat)';
+        }
+        lines.add(
+          _tutarSatiri(
+            '$name$oran',
+            taxAmt,
+            vCur,
+            kur,
+            ek: mat,
+            tl: tekVergi ? tlBelge?.kdv : null,
+          ),
+        );
+        wroteSub = true;
+        structured = true;
+      }
+      if (!wroteSub) {
+        final n = _asNum(v['TaxAmount']);
+        if (n != null) {
+          lines.add(_tutarSatiri('Hesaplanan vergi', n, vCur, kur, tl: tlBelge?.kdv));
+          structured = true;
+        }
+      }
+    }
+
+    add('Vergiler dahil toplam', 'TaxInclusiveAmount');
+    add('Ödenecek tutar', 'PayableAmount');
+  }
+
+  if (!structured) {
+    final q = invData['qnbRaw'];
+    if (q is Map) {
+      final qm = Map<String, dynamic>.from(q);
+      final pb = qm['odenecekTutarDovizCinsi']?.toString().trim() ?? '';
+      final cur = pb.isEmpty ? docCur : pb;
+      final mal = _asNum(qm['malHizmetToplamTutari']);
+      final kdv = _asNum(qm['kdvToplamTutari']);
+      if (mal != null) {
+        lines.add(_tutarSatiri('Mal hizmet toplam tutarı', mal, cur, kur, tl: tlBelge?.mal));
+      }
+      if (kdv != null) {
+        lines.add(_tutarSatiri('Hesaplanan KDV', kdv, cur, kur, tl: tlBelge?.kdv));
+      }
+    }
+    final od = _tutarListStr(invData);
+    if (od != '—') {
+      final q = invData['qnbRaw'];
+      final qm = q is Map ? Map<String, dynamic>.from(q) : <String, dynamic>{};
+      final n = _parseNumLoose(qm['odenecekTutar'] ?? invData['odenecekTutar']);
+      final pb = qm['odenecekTutarDovizCinsi']?.toString() ?? invData['odenecekTutarDovizCinsi']?.toString() ?? docCur;
       if (n != null) {
-        final curRaw = v['currencyID']?.toString().trim() ?? '';
-        final cur = curRaw.isNotEmpty ? curRaw : docCur;
-        lines.add('Vergi tutarı (UBL): ${_formatMoney(n, currency: cur)}');
+        lines.add(_tutarSatiri('Ödenecek tutar', n, pb, kur, tl: tlBelge?.odenecek));
+      } else {
+        lines.add('Ödenecek tutar: $od');
       }
     }
   }
 
-  if (lines.isEmpty) {
-    lines.add('—');
+  final qPortal = invData['qnbRaw'];
+  if (qPortal is Map) {
+    final qm = Map<String, dynamic>.from(qPortal);
+    final pb = qm['odenecekTutarDovizCinsi']?.toString().trim() ?? docCur;
+    void portalSatir(String label, dynamic raw, {num? tl}) {
+      final n = _asNum(raw);
+      if (n == null) return;
+      final goster = _formatMoney(n, currency: pb);
+      if (lines.any((l) => l.contains(goster))) return;
+      lines.add(_tutarSatiri(label, n, pb, kur, tl: tl));
+    }
+
+    portalSatir('Mal hizmet toplamı', qm['malHizmetToplamTutari'], tl: tlBelge?.mal);
+    portalSatir('KDV toplamı', qm['kdvToplamTutari'], tl: tlBelge?.kdv);
+    portalSatir('Ödenecek tutar', qm['odenecekTutar'] ?? invData['odenecekTutar'], tl: tlBelge?.odenecek);
   }
+
+  if (lines.isEmpty) lines.add('—');
   return lines;
 }
 
@@ -1208,6 +1937,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
   final GlobalKey<_KalemKullaniciAciklamaPanelState> _kalemAciklamaPanelKey =
       GlobalKey<_KalemKullaniciAciklamaPanelState>();
   bool _saving = false;
+  bool _mahsupAcik = false;
 
   /// Muhasebe: yalnızca önizleme; açıklama ve Onayla/Reddet yok ([InvoicePdfReviewScreen] ile aynı).
   bool get _isMuhasebe {
@@ -1386,6 +2116,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
     final ettnStr = mergedOnay['ettn']?.toString().trim();
     final onayDurumuStr = mergedOnay['onayDurumu']?.toString().trim();
 
+    final baslik = _faturaBaslikAlanlari(invData);
     final faturaOzeti = <String, dynamic>{
       'belgeNo': belgeNo,
       'faturaTarihi': _faturaTarihi(invData),
@@ -1393,6 +2124,13 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
       'gonderenUnvan': _gonderenUnvani(invData),
       'supplierVkn': _supplierVknStr(invData),
       'faturaTarihiListe': formatTurkishDate(_belgeTarihiListSource(invData)),
+      'senaryo': baslik['senaryo'],
+      'faturaTipi': baslik['faturaTipi'],
+      'duzenlemeSaati': baslik['saat'],
+      'paraBirimi': baslik['paraBirimi'],
+      'satici': _faturaSatici(invData),
+      'alici': _faturaAlici(invData),
+      'referanslar': _faturaReferanslari(invData),
       'tutarListe': _tutarListStr(invData),
       'tutarSatirlari': _tutarOzetiSatirlari(invData),
       'faturaNotlari': _faturaBelgeNotlari(invData),
@@ -1401,7 +2139,10 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
         invData['kalemKullaniciAciklamalari'],
       ),
       'onayAciklamalarText': onayAcikText,
-      if (ettnStr != null && ettnStr.isNotEmpty) 'ettn': ettnStr,
+      if ((baslik['ettn'] ?? '').isNotEmpty)
+        'ettn': baslik['ettn']
+      else if (ettnStr != null && ettnStr.isNotEmpty)
+        'ettn': ettnStr,
       if (onayDurumuStr != null && onayDurumuStr.isNotEmpty) 'onayDurumu': onayDurumuStr,
     };
 
@@ -1416,9 +2157,27 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
       final raw = d.data();
       final dd = Map<String, dynamic>.from(raw);
       final ib = (dd['belgeNo'] ?? dd['belgeNoStr'] ?? d.id).toString().trim();
+      final canonical = dd['belgeNoCanonical']?.toString().trim() ?? '';
+      final baslikIrs = _irsaliyeBaslikAlanlari(dd);
+      final sevk = _irsaliyeSevk(dd);
       irsaliyeler.add({
-        'belgeNo': ib.isNotEmpty ? ib : d.id,
+        'belgeNo': canonical.isNotEmpty ? canonical : (ib.isNotEmpty ? ib : d.id),
+        if (canonical.isNotEmpty && ib.isNotEmpty && canonical != ib) 'belgeNoKisa': ib,
         'tarih': _irsaliyeTarihi(dd),
+        'senaryo': baslikIrs['senaryo'],
+        'saat': baslikIrs['saat'],
+        'ettn': baslikIrs['ettn'],
+        'gonderici': _tarafFromBelgeOzetNode(_belgeOzetMap(dd)?['gonderici']) ??
+            _tarafFromUblParty(_despatchUblNode(dd)?['DespatchSupplierParty']) ??
+            <String, String>{},
+        'alici': _tarafFromBelgeOzetNode(_belgeOzetMap(dd)?['alici']) ??
+            _tarafFromUblParty(
+              _despatchUblNode(dd)?['DeliveryCustomerParty'] ??
+                  _despatchUblNode(dd)?['DespatchCustomerParty'],
+            ) ??
+            <String, String>{},
+        'sevkTarihi': sevk['tarih'],
+        'teslimatAdresi': sevk['adres'],
         'kalemler': _irsaliyeKalemleri(dd),
       });
     }
@@ -1426,6 +2185,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
     return <String, dynamic>{
       'fatura': faturaOzeti,
       'irsaliyeler': irsaliyeler,
+      'muhasebeFisi': invData['muhasebeFisi'],
     };
   }
 
@@ -1434,20 +2194,31 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Fatura özeti'),
-        actions: _isAraOnay
-            ? [
-                IconButton(
-                  tooltip: 'Yönlendir',
-                  icon: const Icon(Icons.person_search_outlined),
-                  onPressed: () async {
-                    final ok =
-                        await showAraOnayYonlendirDialog(context, api: widget.api, item: widget.item);
-                    if (!context.mounted) return;
-                    if (ok) Navigator.of(context).pop(true);
-                  },
-                ),
-              ]
-            : null,
+        actions: [
+          if (_isMuhasebe)
+            Builder(
+              builder: (ctx) {
+                final renk = DefaultTextStyle.of(ctx).style.color;
+                return TextButton.icon(
+                  style: TextButton.styleFrom(foregroundColor: renk),
+                  onPressed: () => setState(() => _mahsupAcik = !_mahsupAcik),
+                  icon: Icon(_mahsupAcik ? Icons.close : Icons.receipt_long_outlined),
+                  label: Text(_mahsupAcik ? 'Fişi Kapat' : 'Mahsup Fişi'),
+                );
+              },
+            ),
+          if (_isAraOnay)
+            IconButton(
+              tooltip: 'Yönlendir',
+              icon: const Icon(Icons.person_search_outlined),
+              onPressed: () async {
+                final ok =
+                    await showAraOnayYonlendirDialog(context, api: widget.api, item: widget.item);
+                if (!context.mounted) return;
+                if (ok) Navigator.of(context).pop(true);
+              },
+            ),
+        ],
       ),
       bottomNavigationBar: _isMuhasebe ? null : _bottomActions(context),
       body: FutureBuilder<Map<String, dynamic>>(
@@ -1497,7 +2268,16 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
               .map((e) => Map<String, dynamic>.from(e))
               .toList();
 
-          return ListView(
+          final fisHam = data['muhasebeFisi'];
+          final mahsupFisi = fisHam is Map ? Map<String, dynamic>.from(fisHam) : null;
+          final mahsupBelgeNo = (f['belgeNo'] ?? widget.item['belgeNo'])?.toString().trim() ?? '';
+
+          return _OzetMahsupKatmani(
+            acik: _isMuhasebe && _mahsupAcik,
+            fis: mahsupFisi,
+            belgeNo: mahsupBelgeNo,
+            onKapat: () => setState(() => _mahsupAcik = false),
+            child: ListView(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
             children: [
               _ozetBolumBaslik(context, 'Onay bilgileri'),
@@ -1509,16 +2289,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
                 ),
               ),
               const SizedBox(height: 16),
-              _ozetBolumBaslik(context, 'Gönderici bilgileri'),
-              _ozetCard(
-                context,
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  child: _gondericiOzeti(context, f),
-                ),
-              ),
-              const SizedBox(height: 16),
-              _ozetBolumBaslik(context, 'Fatura bilgileri'),
+              _ozetBolumBaslik(context, 'Fatura'),
               _ozetCard(
                 context,
                 Padding(
@@ -1526,8 +2297,26 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
                   child: _faturaBelgeOzeti(context, f),
                 ),
               ),
+              const SizedBox(height: 12),
+              _ikiTaraf(
+                context,
+                'Satıcı',
+                _tarafMap(f['satici']),
+                'Alıcı',
+                _tarafMap(f['alici']),
+              ),
+              if ((f['referanslar'] as List?)?.isNotEmpty == true) ...[
+                const SizedBox(height: 12),
+                _ozetCard(
+                  context,
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    child: _referansSatirlari(context, f['referanslar'] as List),
+                  ),
+                ),
+              ],
               const SizedBox(height: 16),
-              _ozetBolumBaslik(context, 'Kalem bilgileri'),
+              _ozetBolumBaslik(context, 'Mal / hizmet'),
               _ozetCard(
                 context,
                 Padding(
@@ -1554,7 +2343,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
                 ),
               ),
               const SizedBox(height: 16),
-              _ozetBolumBaslik(context, 'Tutar bilgileri'),
+              _ozetBolumBaslik(context, 'Toplamlar'),
               _ozetCard(
                 context,
                 Padding(
@@ -1563,7 +2352,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
                 ),
               ),
               const SizedBox(height: 16),
-              _ozetBolumBaslik(context, 'Not bilgileri'),
+              _ozetBolumBaslik(context, 'Notlar'),
               _ozetCard(
                 context,
                 Padding(
@@ -1572,7 +2361,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
                 ),
               ),
               const SizedBox(height: 16),
-              _ozetBolumBaslik(context, 'İrsaliye bilgileri'),
+              _ozetBolumBaslik(context, 'İrsaliye'),
               if (irs.isEmpty)
                 _ozetCard(
                   context,
@@ -1587,6 +2376,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
               else
                 ...irs.map((d) => _despatchCard(context, d)),
             ],
+          ),
           );
         },
       ),
@@ -1614,44 +2404,155 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
     );
   }
 
-  Widget _gondericiOzeti(BuildContext context, Map<String, dynamic> f) {
+  Map<String, String> _tarafMap(dynamic raw) {
+    if (raw is! Map) return {};
+    return Map<String, dynamic>.from(raw).map(
+      (k, v) => MapEntry(k.toString(), v?.toString() ?? ''),
+    );
+  }
+
+  Widget _etiketliSatir(BuildContext context, String etiket, String? deger, {bool vurgulu = false}) {
+    final d = deger?.trim() ?? '';
+    if (d.isEmpty || d == '—') return const SizedBox.shrink();
     final cs = Theme.of(context).colorScheme;
-    final unvan = _fmt(f['gonderenUnvan']);
-    final vkn = f['supplierVkn']?.toString().trim();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Text.rich(
+        TextSpan(
+          children: [
+            TextSpan(
+              text: '$etiket: ',
+              style: TextStyle(
+                fontSize: 13,
+                color: cs.onSurfaceVariant,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            TextSpan(
+              text: d,
+              style: TextStyle(
+                fontSize: 13,
+                height: 1.3,
+                fontWeight: vurgulu ? FontWeight.w600 : FontWeight.w400,
+                color: cs.onSurface,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Basılı e-fatura üst bilgisi: senaryo, tip, no, tarih, saat, ETTN.
+  Widget _faturaBelgeOzeti(BuildContext context, Map<String, dynamic> f) {
+    final belgeNoRaw = (f['belgeNo'] ?? widget.item['belgeNo'])?.toString().trim() ?? '';
+    final bek = (widget.item['muhasebeBeklemeParantez']?.toString() ?? '').trim();
+    final no = belgeNoRaw.isEmpty ? '—' : (bek.isEmpty ? belgeNoRaw : '$belgeNoRaw  $bek');
+    final senaryo = f['senaryo']?.toString().trim() ?? '';
+    final tip = f['faturaTipi']?.toString().trim() ?? '';
+    final ust = _joinNonEmpty([
+      if (senaryo.isNotEmpty) senaryo,
+      if (tip.isNotEmpty) tip,
+    ], ' · ');
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Ünvan: $unvan'),
-        if (vkn != null && vkn.isNotEmpty)
+        if (ust.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Text(
-              'VKN/TCKN: $vkn',
-              style: TextStyle(fontSize: 13, color: cs.onSurface.withValues(alpha: 0.85)),
-            ),
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Text(ust, style: const TextStyle(fontWeight: FontWeight.w600)),
           ),
+        _etiketliSatir(context, 'Fatura no', no, vurgulu: true),
+        Text('Düzenleme tarihi: ${formatTurkishDate(f['faturaTarihi'])}'),
+        _etiketliSatir(context, 'Düzenleme saati', f['duzenlemeSaati']?.toString()),
+        _etiketliSatir(context, 'ETTN', f['ettn']?.toString()),
+        _etiketliSatir(context, 'Para birimi', f['paraBirimi']?.toString()),
+        Text('Portal liste tarihi: ${formatTurkishDate(f['faturaTarihiListe'])}'),
+        Text('Geliş tarihi: ${formatTurkishDate(f['faturaGelisTarihi'])}'),
       ],
     );
   }
 
-  /// Belge no, bekleme etiketi ve tarihler (gönderici / tutar ayrı bölümlerde).
-  Widget _faturaBelgeOzeti(BuildContext context, Map<String, dynamic> f) {
-    final belgeNoRaw = (f['belgeNo'] ?? widget.item['belgeNo'])?.toString().trim() ?? '';
-    final bek = (widget.item['muhasebeBeklemeParantez']?.toString() ?? '').trim();
-    final baseTitle = belgeNoRaw.isNotEmpty ? belgeNoRaw : '—';
-    final titleText = bek.isNotEmpty ? '$baseTitle  $bek' : baseTitle;
-
+  Widget _tarafBlogu(BuildContext context, String baslik, Map<String, String> taraf) {
+    final cs = Theme.of(context).colorScheme;
+    final dolu = _tarafDolu(taraf);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          titleText,
-          style: const TextStyle(fontWeight: FontWeight.w600),
+          baslik,
+          style: TextStyle(fontWeight: FontWeight.w700, color: cs.primary, fontSize: 13),
         ),
         const SizedBox(height: 6),
-        Text('Fatura tarihi (düzenleme): ${formatTurkishDate(f['faturaTarihi'])}'),
-        Text('Portal liste tarihi: ${formatTurkishDate(f['faturaTarihiListe'])}'),
-        Text('Geliş tarihi: ${formatTurkishDate(f['faturaGelisTarihi'])}'),
+        if (!dolu)
+          Text('—', style: TextStyle(color: cs.onSurfaceVariant))
+        else ...[
+          if ((taraf['unvan'] ?? '').isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(taraf['unvan']!, style: const TextStyle(fontWeight: FontWeight.w600)),
+            ),
+          _etiketliSatir(context, 'VKN / TCKN', taraf['kimlik']),
+          _etiketliSatir(context, 'Vergi dairesi', taraf['vergiDairesi']),
+          _etiketliSatir(context, 'Adres', taraf['adres']),
+          _etiketliSatir(context, 'Telefon', taraf['telefon']),
+          _etiketliSatir(context, 'E-posta', taraf['eposta']),
+        ],
+      ],
+    );
+  }
+
+  Widget _ikiTaraf(
+    BuildContext context,
+    String solBaslik,
+    Map<String, String> sol,
+    String sagBaslik,
+    Map<String, String> sag,
+  ) {
+    Widget kart(Widget child) => _ozetCard(
+          context,
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: child,
+          ),
+        );
+    return LayoutBuilder(
+      builder: (context, c) {
+        final left = kart(_tarafBlogu(context, solBaslik, sol));
+        final right = kart(_tarafBlogu(context, sagBaslik, sag));
+        if (c.maxWidth >= 720) {
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(child: left),
+              const SizedBox(width: 12),
+              Expanded(child: right),
+            ],
+          );
+        }
+        return Column(
+          children: [
+            left,
+            const SizedBox(height: 12),
+            right,
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _referansSatirlari(BuildContext context, List<dynamic> refs) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (final raw in refs)
+          if (raw is Map)
+            _etiketliSatir(
+              context,
+              raw['etiket']?.toString() ?? '',
+              raw['deger']?.toString(),
+            ),
       ],
     );
   }
@@ -1996,15 +2897,13 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
     );
   }
 
-  String _irsaliyeSatirBaslik(Map<String, dynamic> k, int i) {
-    final a = k['aciklama']?.toString().trim();
-    if (a != null && a.isNotEmpty) return a;
-    return 'Satır ${i + 1}';
-  }
-
   Widget _despatchCard(BuildContext context, Map<String, dynamic> d) {
     final cs = Theme.of(context).colorScheme;
     final kalemler = d['kalemler'] as List<dynamic>? ?? [];
+    final senaryo = d['senaryo']?.toString().trim() ?? '';
+    final kisa = d['belgeNoKisa']?.toString().trim() ?? '';
+    final gonderici = _tarafMap(d['gonderici']);
+    final alici = _tarafMap(d['alici']);
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Card(
@@ -2015,63 +2914,27 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                children: [
-                  Icon(Icons.local_shipping_outlined, size: 18, color: cs.primary),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _fmt(d['belgeNo']),
-                      style: const TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              Text(
-                'Tarih: ${formatTurkishDate(d['tarih'])}',
-                style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
-              ),
-              if (kalemler.isEmpty)
+              if (senaryo.isNotEmpty)
                 Padding(
-                  padding: const EdgeInsets.only(top: 8),
-                  child: Text(
-                    'İrsaliye kalemi yok.',
-                    style: TextStyle(fontSize: 13, color: cs.outline),
-                  ),
-                )
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Text(senaryo, style: TextStyle(fontWeight: FontWeight.w600, color: cs.primary)),
+                ),
+              _etiketliSatir(context, 'İrsaliye no', d['belgeNo']?.toString(), vurgulu: true),
+              if (kisa.isNotEmpty) _etiketliSatir(context, 'Faturadaki yazım', kisa),
+              _etiketliSatir(context, 'Düzenleme tarihi', formatTurkishDate(d['tarih'], empty: '')),
+              _etiketliSatir(context, 'Düzenleme saati', d['saat']?.toString()),
+              _etiketliSatir(context, 'ETTN', d['ettn']?.toString()),
+              _etiketliSatir(context, 'Fiili sevk tarihi', d['sevkTarihi']?.toString()),
+              _etiketliSatir(context, 'Teslimat adresi', d['teslimatAdresi']?.toString()),
+              const SizedBox(height: 8),
+              _ikiTaraf(context, 'Gönderici', gonderici, 'Teslim alan', alici),
+              const SizedBox(height: 10),
+              Text('Mal / hizmet', style: TextStyle(fontWeight: FontWeight.w700, color: cs.primary, fontSize: 13)),
+              const SizedBox(height: 6),
+              if (kalemler.isEmpty)
+                Text('İrsaliye kalemi yok.', style: TextStyle(fontSize: 13, color: cs.outline))
               else
-                ...List<Widget>.generate(kalemler.length, (i) {
-                  final k = Map<String, dynamic>.from(kalemler[i] as Map);
-                  return Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text('${i + 1}. ', style: TextStyle(color: cs.primary, fontWeight: FontWeight.w600)),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(_irsaliyeSatirBaslik(k, i)),
-                              if (k['satirAciklama'] != null &&
-                                  k['satirAciklama'].toString().trim().isNotEmpty)
-                                Text(
-                                  k['satirAciklama'].toString().trim(),
-                                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-                                ),
-                              if (k['miktar'] != null || k['birim'] != null)
-                                Text(
-                                  'Miktar: ${_fmt(k['miktar'])}${k['birim'] != null ? ' ${k['birim']}' : ''}',
-                                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-                                ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                }),
+                _buildKalemTablosu(context, kalemler),
             ],
           ),
         ),
@@ -2317,3 +3180,79 @@ class _KalemKullaniciAciklamaPanelState extends State<_KalemKullaniciAciklamaPan
     );
   }
 }
+
+/// Özet listesinin üzerinde duran mahsup penceresi. Sürükleme yalnızca bu
+/// katmanı yeniler; alttaki fatura özetinin kaydırma konumu korunur.
+class _OzetMahsupKatmani extends StatefulWidget {
+  const _OzetMahsupKatmani({
+    required this.acik,
+    required this.fis,
+    required this.belgeNo,
+    required this.onKapat,
+    required this.child,
+  });
+
+  final bool acik;
+  final Map<String, dynamic>? fis;
+  final String belgeNo;
+  final VoidCallback onKapat;
+  final Widget child;
+
+  @override
+  State<_OzetMahsupKatmani> createState() => _OzetMahsupKatmaniState();
+}
+
+class _OzetMahsupKatmaniState extends State<_OzetMahsupKatmani> {
+  Offset? _konum;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final alan = constraints.biggest;
+        final panelW = math.min(680.0, math.max(280.0, alan.width - 24));
+        final panelH = math.min(560.0, math.max(240.0, alan.height * 0.62));
+        final varsayilan = Offset(math.max(12, alan.width - panelW - 12), 12);
+        final konum = _konum ?? varsayilan;
+        final sol = konum.dx.clamp(0.0, math.max(0.0, alan.width - 48)).toDouble();
+        final ust = konum.dy.clamp(0.0, math.max(0.0, alan.height - 40)).toDouble();
+        return Stack(
+          children: [
+            Positioned.fill(child: widget.child),
+            if (widget.acik)
+              Positioned(
+                left: sol,
+                top: ust,
+                width: panelW,
+                height: panelH,
+                child: MahsupFisiYuzerPencere(
+                  fis: widget.fis,
+                  belgeNo: widget.belgeNo,
+                  onKapat: widget.onKapat,
+                  onSurukle: (delta) {
+                    setState(() {
+                      final bas = _konum ?? varsayilan;
+                      _konum = Offset(
+                        (bas.dx + delta.dx).clamp(0.0, math.max(0.0, alan.width - 48)).toDouble(),
+                        (bas.dy + delta.dy).clamp(0.0, math.max(0.0, alan.height - 40)).toDouble(),
+                      );
+                    });
+                  },
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+
+
+
+
+
+
+
+
+

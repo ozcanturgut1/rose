@@ -25,18 +25,12 @@ class _MuhasebeFisiDialog extends StatelessWidget {
   final Map<String, dynamic>? fis;
   final String? belgeNo;
 
-  static const double _borcAlacakColWidth = 110;
+  static const double _genisEkranGenisligi = 720;
 
-  String get _durum => fis?['durum']?.toString().trim().toLowerCase() ?? '';
-
-  List<Map<String, dynamic>> get _satirlar {
-    final raw = fis?['satirlar'];
-    if (raw is! List) return const [];
-    return raw
-        .whereType<Object>()
-        .map((e) => e is Map ? Map<String, dynamic>.from(e) : <String, dynamic>{})
-        .where((m) => m.isNotEmpty)
-        .toList();
+  /// Geniş ekranda sabit; dar ekranda ekranın %90'ı (taşmayı önler).
+  static double _dialogGenisligi(BuildContext context) {
+    final w = MediaQuery.sizeOf(context).width;
+    return w < _genisEkranGenisligi + 40 ? w * 0.9 : _genisEkranGenisligi;
   }
 
   @override
@@ -60,7 +54,10 @@ class _MuhasebeFisiDialog extends StatelessWidget {
       ),
       content: SizedBox(
         width: _dialogGenisligi(context),
-        child: _durum == 'ok' ? _buildFis(context) : _buildBosDurum(context),
+        child: MuhasebeFisiGovde(
+          fis: fis,
+          maxTabloYuksekligi: MediaQuery.sizeOf(context).height * 0.45,
+        ),
       ),
       actions: [
         TextButton(
@@ -69,6 +66,40 @@ class _MuhasebeFisiDialog extends StatelessWidget {
         ),
       ],
     );
+  }
+}
+
+/// Fiş gövdesi. Diyalog ve fatura özeti üzerindeki taşınabilir pencere aynı içeriği kullanır.
+class MuhasebeFisiGovde extends StatelessWidget {
+  const MuhasebeFisiGovde({
+    super.key,
+    required this.fis,
+    this.maxTabloYuksekligi,
+  });
+
+  final Map<String, dynamic>? fis;
+
+  /// Verilirse satır tablosu bu yükseklikte kendi içinde kayar. Boşsa tablo
+  /// uzar; kaydırmayı dışarıdaki pencere yapar.
+  final double? maxTabloYuksekligi;
+
+  static const double borcAlacakColWidth = 110;
+
+  String get _durum => fis?['durum']?.toString().trim().toLowerCase() ?? '';
+
+  List<Map<String, dynamic>> get _satirlar {
+    final raw = fis?['satirlar'];
+    if (raw is! List) return const [];
+    return raw
+        .whereType<Object>()
+        .map((e) => e is Map ? Map<String, dynamic>.from(e) : <String, dynamic>{})
+        .where((m) => m.isNotEmpty)
+        .toList();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _durum == 'ok' ? _buildFis(context) : _buildBosDurum(context);
   }
 
   /// Fiş oluşmamış veya ETA'da bulunamamış durumları açıklar.
@@ -102,29 +133,22 @@ class _MuhasebeFisiDialog extends StatelessWidget {
     );
   }
 
-  static const double _genisEkranGenisligi = 720;
-
-  /// Geniş ekranda sabit; dar ekranda ekranın %90'ı (taşmayı önler).
-  static double _dialogGenisligi(BuildContext context) {
-    final w = MediaQuery.of(context).size.width;
-    return w < _genisEkranGenisligi + 40 ? w * 0.9 : _genisEkranGenisligi;
-  }
-
   Widget _buildFis(BuildContext context) {
+    final tablo = _buildSatirTablosu(context);
+    final sinir = maxTabloYuksekligi;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
         _buildBaslik(context),
         const SizedBox(height: 12),
-        ConstrainedBox(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(context).size.height * 0.45,
-          ),
-          child: SingleChildScrollView(
-            child: _buildSatirTablosu(context),
-          ),
-        ),
+        if (sinir != null && sinir > 0)
+          ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: sinir),
+            child: SingleChildScrollView(child: tablo),
+          )
+        else
+          tablo,
         const Divider(height: 20),
         _buildToplamlar(context),
       ],
@@ -182,8 +206,8 @@ class _MuhasebeFisiDialog extends StatelessWidget {
     return Table(
       columnWidths: const {
         0: FlexColumnWidth(),
-        1: FixedColumnWidth(_borcAlacakColWidth),
-        2: FixedColumnWidth(_borcAlacakColWidth),
+        1: FixedColumnWidth(borcAlacakColWidth),
+        2: FixedColumnWidth(borcAlacakColWidth),
       },
       defaultVerticalAlignment: TableCellVerticalAlignment.middle,
       children: [
@@ -282,7 +306,7 @@ class _MuhasebeFisiDialog extends StatelessWidget {
               child: Text('Toplam', style: TextStyle(fontWeight: FontWeight.w600)),
             ),
             SizedBox(
-              width: _borcAlacakColWidth,
+              width: borcAlacakColWidth,
               child: Text(
                 formatTurkishAmount(borc),
                 textAlign: TextAlign.right,
@@ -290,7 +314,7 @@ class _MuhasebeFisiDialog extends StatelessWidget {
               ),
             ),
             SizedBox(
-              width: _borcAlacakColWidth,
+              width: borcAlacakColWidth,
               child: Text(
                 formatTurkishAmount(alacak),
                 textAlign: TextAlign.right,
@@ -317,6 +341,121 @@ class _MuhasebeFisiDialog extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+/// Fatura özetinin üzerinde duran, başlığından sürüklenebilen mahsup fişi.
+///
+/// Pencere yalnızca kendi alanını kaplar; altındaki özet kaydırmayı alır.
+class MahsupFisiYuzerPencere extends StatelessWidget {
+  const MahsupFisiYuzerPencere({
+    super.key,
+    required this.fis,
+    required this.onKapat,
+    required this.onSurukle,
+    this.belgeNo,
+  });
+
+  final Map<String, dynamic>? fis;
+  final String? belgeNo;
+  final VoidCallback onKapat;
+  final void Function(Offset delta) onSurukle;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final belge = (belgeNo ?? '').trim();
+    return Material(
+      elevation: 12,
+      shadowColor: Colors.black54,
+      color: cs.surface,
+      surfaceTintColor: cs.surfaceTint,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: cs.outlineVariant),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        children: [
+          _BaslikSurukle(
+            onSurukle: onSurukle,
+            child: Container(
+              color: cs.surfaceContainerHighest,
+              padding: const EdgeInsets.fromLTRB(8, 4, 4, 4),
+              child: Row(
+                children: [
+                  Icon(Icons.drag_indicator, size: 20, color: cs.onSurfaceVariant),
+                  const SizedBox(width: 4),
+                  const Expanded(
+                    child: Text(
+                      'Mahsup Fişi',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Kapat',
+                    visualDensity: VisualDensity.compact,
+                    onPressed: onKapat,
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (belge.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(belge, style: Theme.of(context).textTheme.bodySmall),
+              ),
+            ),
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+              child: MuhasebeFisiGovde(fis: fis),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Başlık çubuğu. Fare ve dokunmatik sürüklemeyi aynı şekilde iletir.
+class _BaslikSurukle extends StatefulWidget {
+  const _BaslikSurukle({required this.onSurukle, required this.child});
+
+  final void Function(Offset delta) onSurukle;
+  final Widget child;
+
+  @override
+  State<_BaslikSurukle> createState() => _BaslikSurukleState();
+}
+
+class _BaslikSurukleState extends State<_BaslikSurukle> {
+  int? _pointer;
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      behavior: HitTestBehavior.opaque,
+      onPointerDown: (event) => _pointer = event.pointer,
+      onPointerMove: (event) {
+        if (event.pointer != _pointer) return;
+        widget.onSurukle(event.delta);
+      },
+      onPointerUp: (event) {
+        if (event.pointer == _pointer) _pointer = null;
+      },
+      onPointerCancel: (event) {
+        if (event.pointer == _pointer) _pointer = null;
+      },
+      child: MouseRegion(
+        cursor: SystemMouseCursors.move,
+        child: widget.child,
+      ),
     );
   }
 }

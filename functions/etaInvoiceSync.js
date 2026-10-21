@@ -22,6 +22,13 @@ import {
 } from "./aracGiderKurallari.js";
 import { buildMuhasebeFisiSnapshot } from "./etaMuhasebeFisi.js";
 import { resolveFaturaProcNames } from "./etaFaturaProcNames.js";
+import {
+  aciklamadaCekYerineSenet,
+  analyzeCekSenetKurFarki,
+  belgeMetnindeKurFarki,
+  cariDovizKarti,
+  resolveCekSenetKurFarkiStok,
+} from "./cekSenetKurFarki.js";
 
 let readPoolPromise = null;
 let writePoolPromise = null;
@@ -952,6 +959,22 @@ function shouldUseDirectItemCodeFallback(line, rawItemCode) {
   if (isCodeLikeText(primary)) return true;
   if (codeSimilarity(primary, kod) >= 0.7) return true;
   return false;
+}
+
+/**
+ * Fatura satır açıklamasının sonuna stok cinsini ekler.
+ * Açıklama uzunsa gövde kısaltılır; stok cinsi sığdığı sürece sonda kalır.
+ */
+function aciklamaSonunaStokCinsi(lineAcik, stokCinsi, maxLen) {
+  const acik = String(lineAcik || "").trim();
+  const stok = String(stokCinsi || "").trim();
+  const limit = maxLen > 0 ? maxLen : acik.length + stok.length + 3;
+  if (!stok) return acik.slice(0, limit);
+  if (!acik || acik === stok || acik.endsWith(` | ${stok}`)) return (acik || stok).slice(0, limit);
+  const ek = ` | ${stok}`;
+  if (ek.length >= limit) return stok.slice(0, limit);
+  const govde = acik.slice(0, limit - ek.length).trimEnd();
+  return `${govde}${ek}`;
 }
 
 function extractInvoiceLines(data) {
@@ -2015,7 +2038,8 @@ export async function previewStockLineMatches(afterData) {
   const defaults = await loadDefaults(rPool, wPool);
   const supplierVkn = String(afterData.supplierVkn || q.gondericiVkn || q.vknTckn || "").trim();
   const cls = classifyInvoiceType(afterData);
-  const lines = applyKalemKullaniciAciklamalari(extractInvoiceLines(afterData), afterData);
+  const rawLines = extractInvoiceLines(afterData);
+  const lines = applyKalemKullaniciAciklamalari(rawLines, afterData);
   const usableLines = lines.length
     ? lines
     : [
@@ -2053,6 +2077,35 @@ export async function previewStockLineMatches(afterData) {
 
   const allowAutoStk = String(process.env.ETA_AUTO_CREATE_STKKART ?? "1").trim() !== "0";
   const stkTemplate = (process.env.ETA_STKKART_TEMPLATE_KOD || "").trim() || defaults.stok;
+  let cekSenetStok = null;
+  const cekSenetIpucu = analyzeCekSenetKurFarki(afterData, rawLines);
+  if (cekSenetIpucu && supplierVkn) {
+    try {
+      const kf = await resolveCariKodForKurFarki(rPool, supplierVkn, paraBirimiRaw);
+      if (!kf?.blocked) {
+        const cariResolved =
+          kf ||
+          (await resolveCariKod(
+            rPool,
+            supplierVkn,
+            isForeignCurrency ? paraBirimiRaw : ""
+          ));
+        if (cariResolved?.carkod) {
+          cekSenetStok = await resolveCekSenetKurFarkiStok(
+            rPool,
+            wPool,
+            cekSenetIpucu,
+            cariResolved.carkod
+          );
+        }
+      }
+    } catch (err) {
+      console.warn(
+        "previewStockLineMatches: çek/senet kur farkı teyidi atlandı",
+        err?.message || err
+      );
+    }
+  }
   const lineMatches = [];
 
   for (let i = 0; i < usableLines.length; i++) {
@@ -2064,13 +2117,19 @@ export async function previewStockLineMatches(afterData) {
     const historyMatch = preMatchedHistories[i] ?? null;
     let stokFamilyRemapFrom = null;
 
-    const histResolved = await resolveStockFromHistoryMatch(wPool, historyMatch, l, {
-      allowAutoStk,
-      stkTemplate,
-    });
+    const histResolved = cekSenetStok
+      ? {
+          itemCodeResolved: cekSenetStok.stkkod,
+          matchSource: cekSenetStok.source,
+          stokFamilyRemapFrom: null,
+        }
+      : await resolveStockFromHistoryMatch(wPool, historyMatch, l, {
+          allowAutoStk,
+          stkTemplate,
+        });
     itemCodeResolved = histResolved.itemCodeResolved;
     matchSource = histResolved.matchSource;
-    if (historyMatch?.dominantFallback && matchSource) {
+    if (!cekSenetStok && historyMatch?.dominantFallback && matchSource) {
       matchSource = "supplier_history_dominant";
     }
     stokFamilyRemapFrom = histResolved.stokFamilyRemapFrom;
@@ -2185,10 +2244,11 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   const paraBirimiRaw = extractInvoiceCurrency(afterData);
   const isForeignCurrencyEarly = !isDomesticTryOrTl(paraBirimiRaw);
 
-  // Kur farkı faturaları: kendi para birimine (çoğunlukla TL) değil, VKN'nin döviz
-  // carisine yönlendirilir. Hedef döviz birden çok cariye denk gelirse kayıt YAPILMAZ.
+  // Kur farkı: satır metni veya genel fatura notu. Döviz carisine yönlendirilir.
+  // Hedef döviz birden çok cariye denk gelirse kayıt yapılmaz.
   let cariResolved;
-  const isKurFarki = isKurFarkiInvoice(extractInvoiceLines(afterData));
+  const rawLines = extractInvoiceLines(afterData);
+  const isKurFarki = belgeMetnindeKurFarki(afterData, rawLines);
   if (isKurFarki) {
     const kf = await resolveCariKodForKurFarki(rPool, supplierVkn, paraBirimiRaw);
     if (kf?.blocked) {
@@ -2233,7 +2293,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   const cls = classifyInvoiceType(afterData);
   // erpFaturaTipiNo aşağıda paraBirimi hesabından sonra, eşlenen geçmiş fatura
   // çoğunluk oyu ile belirleniyor (kullanıcı talebi 12 May 2026).
-  const lines = applyKalemKullaniciAciklamalari(extractInvoiceLines(afterData), afterData);
+  const lines = applyKalemKullaniciAciklamalari(rawLines, afterData);
   const usableLines = lines.length
     ? lines
     : [
@@ -2451,6 +2511,26 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
 
   const allowAutoStk = String(process.env.ETA_AUTO_CREATE_STKKART ?? "1").trim() !== "0";
   const stkTemplate = (process.env.ETA_STKKART_TEMPLATE_KOD || "").trim() || defaults.stok;
+  let cekSenetStok = null;
+  if (isKurFarki && erpCariKodu) {
+    const cekSenetIpucu = analyzeCekSenetKurFarki(afterData, rawLines);
+    if (cekSenetIpucu) {
+      try {
+        cekSenetStok = await resolveCekSenetKurFarkiStok(
+          rPool,
+          wPool,
+          cekSenetIpucu,
+          erpCariKodu
+        );
+      } catch (err) {
+        console.warn(
+          "syncApprovedInvoiceToEta: çek/senet kur farkı teyidi atlandı",
+          docId,
+          err?.message || err
+        );
+      }
+    }
+  }
 
   for (let i = 0; i < usableLines.length; i++) {
     const l = usableLines[i];
@@ -2479,13 +2559,19 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
       }
     }
     let stokFamilyRemapFrom = null;
-    const histResolved = await resolveStockFromHistoryMatch(wPool, historyMatch, l, {
-      allowAutoStk,
-      stkTemplate,
-    });
+    const histResolved = cekSenetStok
+      ? {
+          itemCodeResolved: cekSenetStok.stkkod,
+          matchSource: cekSenetStok.source,
+          stokFamilyRemapFrom: null,
+        }
+      : await resolveStockFromHistoryMatch(wPool, historyMatch, l, {
+          allowAutoStk,
+          stkTemplate,
+        });
     itemCodeResolved = histResolved.itemCodeResolved;
     matchSource = histResolved.matchSource;
-    if (historyMatch?.dominantFallback && matchSource) {
+    if (!cekSenetStok && historyMatch?.dominantFallback && matchSource) {
       matchSource = "supplier_history_dominant";
     }
     stokFamilyRemapFrom = histResolved.stokFamilyRemapFrom;
@@ -2561,15 +2647,20 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     const unitPriceForSp = alignedLine?.unitPrice ?? unitPriceForEtaLine(l, isForeignCurrency, effectiveDovizKuru);
     const taxAmountForSp = lineTax;
     const lineAcik = String(l.lineAciklama || "").trim();
-    const satirAcikSrc = String(lineAcik || l.stokCinsi || l.itemCode || "HIZMET").trim();
-    const satirNotu = satirAcikSrc.slice(0, 50);
-    const satirAcik = satirAcikSrc.slice(0, 255);
+    const stokCinsiMetin = String(l.stokCinsi || "").trim();
+    const satirNotu = String(lineAcik || stokCinsiMetin || l.itemCode || "HIZMET").trim().slice(0, 50);
+    const senetAciklama = cekSenetStok?.source === "senet_kur_farki";
+    const satirAcik = senetAciklama
+      ? aciklamadaCekYerineSenet(aciklamaSonunaStokCinsi(lineAcik, stokCinsiMetin, 255))
+      : aciklamaSonunaStokCinsi(lineAcik, stokCinsiMetin, 255);
     const docLineNet = alignedLine?.docNet ?? strictLineNetFromUbl(l);
     const docLineUnit = alignedLine?.docUnitPrice ?? strictLineUnitPriceFromUbl(l);
     lineCurrency.push({
       sira: i + 1,
       dovFiyat: docLineUnit,
       dovTutar: docLineNet,
+      tlNet: Number(alignedLine?.netTl ?? docLineNet) || 0,
+      tlBirim: Number(unitPriceForSp) || 0,
     });
 
     const dr = wPool.request();
@@ -2636,8 +2727,9 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
         `);
     }
 
-    const stkc = String(l.stokCinsi || "").trim().slice(0, 80);
-    const ac = lineAcik;
+    const stkc = stokCinsiMetin.slice(0, 80);
+    const acHam = aciklamaSonunaStokCinsi(lineAcik, stokCinsiMetin, 160);
+    const ac = senetAciklama ? aciklamadaCekYerineSenet(acHam) : acHam;
     if (stkc || ac) {
       await wPool
         .request()
@@ -2658,12 +2750,45 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   }
 
   await patchFatFisIrsaliyeAlanlari(wPool, fatFisRefNo, despatchesFromSubcol);
+  let currencyCodeForPatch = paraBirimiRaw;
+  let currencyTypeForPatch = "";
+  let kurForPatch = effectiveDovizKuru;
+  let dovizTopForPatch = docOdenecekTutar;
+  let lineCurrencyForPatch = lineCurrency;
+  if (cekSenetStok && !isForeignCurrency) {
+    try {
+      let cariDov = await cariDovizKarti(wPool, erpCariKodu);
+      if (!cariDov || !cariDov.kod) {
+        const okunan = await cariDovizKarti(rPool, erpCariKodu);
+        if (okunan) cariDov = okunan;
+      }
+      const acikKur = parseExchangeRate(q.dovizKuru ?? ublDovizKuru, 0);
+      if (cariDov && !cariDov.domestic && cariDov.kod && acikKur > 1) {
+        currencyCodeForPatch = cariDov.kod;
+        currencyTypeForPatch = cariDov.tur;
+        kurForPatch = acikKur;
+        dovizTopForPatch = roundMoney(odenecekTutarKayit / acikKur);
+        lineCurrencyForPatch = lineCurrency.map((ln) => ({
+          sira: ln.sira,
+          dovTutar: roundMoney((ln.tlNet || 0) / acikKur),
+          dovFiyat: roundMoney((ln.tlBirim || 0) / acikKur),
+        }));
+      }
+    } catch (err) {
+      console.warn(
+        "syncApprovedInvoiceToEta: çek/senet döviz karşılığı atlandı",
+        docId,
+        err?.message || err
+      );
+    }
+  }
   await patchCurrencyFields(wPool, fatFisRefNo, {
-    currencyCode: paraBirimiRaw,
-    dovizKuru: effectiveDovizKuru,
-    docOdenecekTutar,
+    currencyCode: currencyCodeForPatch,
+    ...(currencyTypeForPatch ? { currencyType: currencyTypeForPatch } : {}),
+    dovizKuru: kurForPatch,
+    docOdenecekTutar: dovizTopForPatch,
     faturaTarihi,
-    lineCurrency,
+    lineCurrency: lineCurrencyForPatch,
   });
 
   await wPool

@@ -58,6 +58,9 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
   bool _listTapShowsJson = true;
   /// Admin'de, yalnızca seçilen faturaları Firestore'a backfill etmek için `belgeNo` kümesi.
   final Set<String> _selectedBelgeNosForBackfill = <String>{};
+  /// Nihai onay: içine girmeden onaylanacak faturaların `invoiceDocId` kümesi.
+  final Set<String> _seciliNihaiDocIds = <String>{};
+  bool _nihaiTopluOnay = false;
   /// Admin listesinde sayfa indeksi (0 tabanlı); yalnızca görünüm — API tek seferde yüklenir.
   int _adminListPage = 0;
 
@@ -375,8 +378,8 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
 
   /// Firestore — tarih süzmesi yok; şarta uyan tüm `invoice_*` faturalar.
   ///
-  /// **nihai / muhasebe (arşiv bekliyor|onaylandı|reddedildi):** `onayDurumu` eşitliği + `orderBy(__name__)` (bileşik indeks gerekebilir).
-  /// **muhasebe · arşiv bekliyor:** `onaylandı` sorgusu + bellekte [_arsiveTasinmayiBekliyor] süzmesi.
+  /// **nihai / muhasebe (onaylandı|reddedildi):** `onayDurumu` eşitliği + `orderBy(__name__)` (bileşik indeks gerekebilir).
+  /// **muhasebe · arşiv bekliyor:** yalnızca `arsivDurumu == arsiv_bekliyor`. Tüm onaylı faturalar indirilmez.
   /// **muhasebe · onay bekliyor:** Ara (boş `onayDurumu`) + Nihai (`onaya sunuldu`) birleşik liste.
   /// **ara:** Koleksiyonun tamamı taranır.
   Future<List<Map<String, dynamic>>> _fetchInvoicesFromFirestoreOnly() async {
@@ -430,7 +433,10 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     final out = <Map<String, dynamic>>[];
 
     final List<QueryDocumentSnapshot<Map<String, dynamic>>> docs;
-    if (mode == 'nihai_onay') {
+    if (mode == 'muhasebe' && _muhasebeFiltre == _MuhasebeFiltre.arsivBekliyor) {
+      final snap = await col.where('arsivDurumu', isEqualTo: 'arsiv_bekliyor').get();
+      docs = snap.docs;
+    } else if (mode == 'nihai_onay') {
       docs = await _paginateByDocId(
         () => col
             .where('onayDurumu', isEqualTo: _nihaiOnayDurumuValue)
@@ -513,6 +519,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
         loading = true;
         error = null;
         _selectedBelgeNosForBackfill.clear();
+        _seciliNihaiDocIds.clear();
       });
       try {
         final list = await _fetchInvoicesFromFirestoreOnly();
@@ -522,6 +529,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
           loading = false;
           _lastResponseJson = null;
           _selectedBelgeNosForBackfill.clear();
+          _seciliNihaiDocIds.clear();
         });
       } catch (e) {
         setState(() {
@@ -529,6 +537,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
           loading = false;
           _lastResponseJson = null;
           _selectedBelgeNosForBackfill.clear();
+          _seciliNihaiDocIds.clear();
         });
       }
       return;
@@ -574,6 +583,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
         loading = false;
         _lastResponseJson = jsonText;
         _selectedBelgeNosForBackfill.clear();
+        _seciliNihaiDocIds.clear();
         _adminListPage = 0;
       });
     } catch (e) {
@@ -865,6 +875,78 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     );
   }
 
+  Future<void> _secilenNihaiFaturalariOnayla() async {
+    if (_listFilterMode != 'nihai_onay' || _nihaiTopluOnay) return;
+    final secilen = items.where((it) {
+      final id = (it['invoiceDocId']?.toString() ?? '').trim();
+      return id.isNotEmpty && _seciliNihaiDocIds.contains(id);
+    }).toList();
+    if (secilen.isEmpty) return;
+
+    final n = secilen.length;
+    final ornekler = secilen
+        .map((it) => (it['belgeNo']?.toString() ?? '').trim())
+        .where((s) => s.isNotEmpty)
+        .take(8)
+        .toList();
+    final liste = ornekler.isEmpty ? '' : '\n\n${ornekler.join('\n')}';
+    final fazla = n > ornekler.length ? '\n…' : '';
+    final onay = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Seçilen faturalar onaylansın mı?'),
+        content: Text(
+          '$n fatura, içine girilmeden onaylanacak.$liste$fazla',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Vazgeç'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Onayla'),
+          ),
+        ],
+      ),
+    );
+    if (onay != true || !mounted) return;
+
+    setState(() {
+      _nihaiTopluOnay = true;
+      error = null;
+    });
+    var tamam = 0;
+    String? hata;
+    for (final it in secilen) {
+      final docId = (it['invoiceDocId']?.toString() ?? '').trim();
+      try {
+        await widget.api.updateQnbInvoiceYonetimOnay(
+          docId: docId,
+          decision: 'onaylandı',
+          aciklamaRole: 'nihai_onay',
+        );
+        tamam++;
+      } catch (e) {
+        hata = e.toString();
+        break;
+      }
+    }
+    if (!mounted) return;
+    setState(() => _nihaiTopluOnay = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          hata == null
+              ? '$tamam fatura onaylandı.'
+              : '$tamam fatura onaylandı. Kalanlar onaylanamadı.',
+        ),
+      ),
+    );
+    await _load();
+    if (hata != null && mounted) setState(() => error = hata);
+  }
+
   Future<void> _yonlendirFatura(BuildContext context, Map<String, dynamic> it) async {
     final ok = await showAraOnayYonlendirDialog(context, api: widget.api, item: it);
     if (!context.mounted) return;
@@ -924,11 +1006,17 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     });
     try {
       await widget.api.archiveQnbInvoice(docId: docId);
+      if (!mounted) return;
+      setState(() {
+        loading = false;
+        items = items
+            .where((x) => (x['invoiceDocId']?.toString() ?? '').trim() != docId)
+            .toList();
+      });
       if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Fatura ve ilgili irsaliyeler arşive taşındı.')),
       );
-      await _load();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -1206,6 +1294,61 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
               dense: true,
             ),
           ),
+          if (_listFilterMode == 'nihai_onay')
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+              child: Row(
+                children: [
+                  TextButton(
+                    onPressed: loading || _nihaiTopluOnay || items.isEmpty
+                        ? null
+                        : () {
+                            final idler = items
+                                .map((it) => (it['invoiceDocId']?.toString() ?? '').trim())
+                                .where((id) => id.isNotEmpty)
+                                .toSet();
+                            final hepsi = idler.isNotEmpty && idler.every(_seciliNihaiDocIds.contains);
+                            setState(() {
+                              if (hepsi) {
+                                _seciliNihaiDocIds.clear();
+                              } else {
+                                _seciliNihaiDocIds
+                                  ..clear()
+                                  ..addAll(idler);
+                              }
+                            });
+                          },
+                    child: Text(
+                      items.isNotEmpty &&
+                              items.every((it) {
+                                final id = (it['invoiceDocId']?.toString() ?? '').trim();
+                                return id.isNotEmpty && _seciliNihaiDocIds.contains(id);
+                              })
+                          ? 'İşaretleri kaldır'
+                          : 'Tümünü işaretle',
+                    ),
+                  ),
+                  const Spacer(),
+                  FilledButton.icon(
+                    onPressed: _seciliNihaiDocIds.isEmpty || loading || _nihaiTopluOnay
+                        ? null
+                        : _secilenNihaiFaturalariOnayla,
+                    icon: _nihaiTopluOnay
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.done_all, size: 18),
+                    label: Text(
+                      _seciliNihaiDocIds.isEmpty
+                          ? 'Seçilenleri onayla'
+                          : 'Seçilenleri onayla (${_seciliNihaiDocIds.length})',
+                    ),
+                  ),
+                ],
+              ),
+            ),
           if (_listFilterMode == 'muhasebe')
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
@@ -1282,6 +1425,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
                                         bek.isNotEmpty ? '$baseTitle  $bek' : baseTitle;
 
                                     final isAdmin = _listFilterMode == 'admin';
+                                    final isNihai = _listFilterMode == 'nihai_onay';
                                     final isAraOnay = _listFilterMode == 'ara_onay';
                                     final arsiveTasinabilir =
                                         _listFilterMode == 'muhasebe' &&
@@ -1291,24 +1435,39 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
                                         (it['araOnayAtananUid']?.toString() ?? '').trim();
                                     final atananBana = atanan.isNotEmpty && atanan == myUid;
 
-                                    final isSelected = isAdmin &&
-                                        belgeNo.isNotEmpty &&
-                                        _selectedBelgeNosForBackfill.contains(belgeNo);
+                                    final docId = (it['invoiceDocId']?.toString() ?? '').trim();
+                                    final isSelected = isAdmin
+                                        ? belgeNo.isNotEmpty &&
+                                            _selectedBelgeNosForBackfill.contains(belgeNo)
+                                        : isNihai &&
+                                            docId.isNotEmpty &&
+                                            _seciliNihaiDocIds.contains(docId);
 
                                     return ListTile(
-                                      leading: isAdmin
+                                      leading: isAdmin || isNihai
                                           ? Checkbox(
                                               value: isSelected,
-                                              onChanged: (v) {
-                                                setState(() {
-                                                  if (!isAdmin || belgeNo.isEmpty) return;
-                                                  if (v == true) {
-                                                    _selectedBelgeNosForBackfill.add(belgeNo);
-                                                  } else {
-                                                    _selectedBelgeNosForBackfill.remove(belgeNo);
-                                                  }
-                                                });
-                                              },
+                                              onChanged: (isNihai && (loading || _nihaiTopluOnay))
+                                                  ? null
+                                                  : (v) {
+                                                      setState(() {
+                                                        if (isAdmin) {
+                                                          if (belgeNo.isEmpty) return;
+                                                          if (v == true) {
+                                                            _selectedBelgeNosForBackfill.add(belgeNo);
+                                                          } else {
+                                                            _selectedBelgeNosForBackfill.remove(belgeNo);
+                                                          }
+                                                          return;
+                                                        }
+                                                        if (docId.isEmpty) return;
+                                                        if (v == true) {
+                                                          _seciliNihaiDocIds.add(docId);
+                                                        } else {
+                                                          _seciliNihaiDocIds.remove(docId);
+                                                        }
+                                                      });
+                                                    },
                                             )
                                           : null,
                                       title: Text(

@@ -32,6 +32,119 @@ export function itemBelgeNo(it) {
   return it?.belgeNo ?? it?.belgeNoStr ?? it?.irsaliyeNo ?? it?.belgeNumarasi ?? null;
 }
 
+/**
+ * Türk e-belge no parçaları: harf serisi + 4 haneli yıl + sıra.
+ * Kısa yazım: SERİ + YY + kısa sıra (MYF26-1614 → MYF / 2026 / 1614).
+ * @returns {{ prefix: string, year: string, serial: string } | null}
+ */
+export function parseEBelgeParts(raw) {
+  const key = belgeNoKey(raw);
+  if (!key) return null;
+  const mFull = key.match(/^([A-Z]+)(20\d{2})(\d+)$/);
+  if (mFull) {
+    return {
+      prefix: mFull[1],
+      year: mFull[2],
+      serial: String(parseInt(mFull[3], 10)),
+    };
+  }
+  const mShort = key.match(/^([A-Z]+)(\d{2})(\d+)$/);
+  if (mShort) {
+    return {
+      prefix: mShort[1],
+      year: `20${mShort[2]}`,
+      serial: String(parseInt(mShort[3], 10)),
+    };
+  }
+  return null;
+}
+
+/** Orijinal key + mümkünse prefix+year+serial.padStart(9,"0") aday anahtarları. */
+export function expandEBelgeCandidates(raw) {
+  const key = belgeNoKey(raw);
+  const out = [];
+  if (key) out.push(key);
+  const parts = parseEBelgeParts(raw);
+  if (parts) {
+    const expanded = `${parts.prefix}${parts.year}${parts.serial.padStart(9, "0")}`;
+    if (!out.includes(expanded)) out.push(expanded);
+  }
+  return out;
+}
+
+export function belgeNosEquivalent(a, b) {
+  const ka = belgeNoKey(a);
+  const kb = belgeNoKey(b);
+  if (!ka || !kb) return false;
+  if (ka === kb) return true;
+  const pa = parseEBelgeParts(a);
+  const pb = parseEBelgeParts(b);
+  if (!pa || !pb) return false;
+  return pa.prefix === pb.prefix && pa.year === pb.year && pa.serial === pb.serial;
+}
+
+/**
+ * Listede belge no eşleşmesi: exact → expand exact → loose (tek aday).
+ * Birden fazla loose adayda null (yanlış eşleşme yok).
+ * @param {object[]} items
+ * @param {string} wantRaw
+ * @param {(it: object) => string|null} [getBelgeNo]
+ */
+export function pickBelgeNoMatch(items, wantRaw, getBelgeNo = itemBelgeNo) {
+  const arr = Array.isArray(items) ? items : [];
+  const want = belgeNoKey(wantRaw);
+  if (!want) return null;
+
+  const exact = arr.find((it) => belgeNoKey(getBelgeNo(it)) === want);
+  if (exact) return exact;
+
+  const candidates = expandEBelgeCandidates(wantRaw);
+  for (const cand of candidates) {
+    if (cand === want) continue;
+    const hit = arr.find((it) => belgeNoKey(getBelgeNo(it)) === cand);
+    if (hit) return hit;
+  }
+
+  const wantParts = parseEBelgeParts(wantRaw);
+  if (!wantParts) return null;
+  const loose = arr.filter((it) => {
+    const bn = getBelgeNo(it);
+    if (bn == null || bn === "") return false;
+    return belgeNosEquivalent(wantRaw, bn);
+  });
+  if (loose.length === 1) return loose[0];
+  return null;
+}
+
+/** Firestore doc id: despatch_<safeBelgeNo> */
+export function despatchDocIdFromBelgeNo(belgeNo) {
+  const safe = String(belgeNo || "").replace(/[/\\]/g, "_").trim();
+  if (!safe) return null;
+  return `despatch_${safe}`;
+}
+
+/** Kısa/uzun no için denenecek qnb_docs doc id listesi (ilk benzersiz). */
+export function despatchDocIdCandidates(belgeNo) {
+  const seen = new Set();
+  const out = [];
+  const add = (raw) => {
+    const id = despatchDocIdFromBelgeNo(raw);
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      out.push(id);
+    }
+  };
+  add(belgeNo);
+  for (const key of expandEBelgeCandidates(belgeNo)) add(key);
+  const parts = parseEBelgeParts(belgeNo);
+  if (parts) {
+    // Kısa alias formları da dene (MYF26-1614 / MYF261614)
+    add(`${parts.prefix}${parts.year.slice(2)}-${parts.serial}`);
+    add(`${parts.prefix}${parts.year.slice(2)}${parts.serial}`);
+  }
+  return out;
+}
+
 function normalizeListItems(resp) {
   if (!resp) return [];
   let raw = resp.return ?? resp.belgeListesi ?? resp.list ?? resp;
@@ -148,7 +261,6 @@ async function listDespatches(vknTckn, q) {
  *   "bulunamadı" kesin değildir.
  */
 export async function findDespatchInPortal(vknTckn, belgeNo, opts = {}) {
-  const want = belgeNoKey(belgeNo);
   const { queries, window } = planDespatchQueries(opts);
   const done = [];
   let lastError = null;
@@ -163,7 +275,7 @@ export async function findDespatchInPortal(vknTckn, belgeNo, opts = {}) {
       continue;
     }
     done.push({ ...q, count: items.length });
-    const item = items.find((it) => belgeNoKey(itemBelgeNo(it)) === want) || null;
+    const item = pickBelgeNoMatch(items, belgeNo);
     if (item) return { item, error: null, window, queries: done };
     if (items.length >= PORTAL_LIST_CAP) {
       logger.warn("findDespatchInPortal: dilim liste sınırına ulaştı, sonuç eksik olabilir", {

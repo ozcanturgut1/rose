@@ -23,6 +23,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureAdmin } from "../adminInit.js";
 import { getFirestore } from "firebase-admin/firestore";
+import { despatchDocIdCandidates } from "../qnbDespatchPortalLookup.js";
 
 const ETTN_REGEX = /^[0-9A-Fa-f-]{30,}$/;
 const looksLikeDespatchXml = (s) =>
@@ -50,9 +51,17 @@ async function describeDespatches(db, invRef) {
   for (const d of snap.docs) {
     const x = d.data() || {};
     const belgeNo = String(x.belgeNo ?? x.belgeNoStr ?? "").trim();
-    const cache = belgeNo
-      ? await db.collection("qnb_docs").doc(`despatch_${belgeNo.replace(/[/\\]/g, "_")}`).get()
-      : null;
+    const canonical = x.belgeNoCanonical != null ? String(x.belgeNoCanonical).trim() : "";
+    let cache = null;
+    if (belgeNo || canonical) {
+      for (const docId of despatchDocIdCandidates(canonical || belgeNo)) {
+        const snap = await db.collection("qnb_docs").doc(docId).get();
+        if (snap.exists) {
+          cache = snap;
+          break;
+        }
+      }
+    }
     const c = cache?.exists ? cache.data() || {} : null;
     rows.push({
       belgeNo,

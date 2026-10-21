@@ -33,7 +33,12 @@ import {
   readDespatchFromQnbDocs,
   readEttnFromQnbDocsForDespatch,
 } from "./enrichInvoiceWithRelatedDespatches.js";
-import { findDespatchInPortal } from "./qnbDespatchPortalLookup.js";
+import {
+  findDespatchInPortal,
+  belgeNoKey,
+  despatchDocIdFromBelgeNo,
+  itemBelgeNo,
+} from "./qnbDespatchPortalLookup.js";
 
 const db = getFirestore();
 
@@ -121,12 +126,6 @@ function invoiceDocIdForKey(it) {
     it?.ettn || it?.ETTN || it?.belgeOid || it?.belgeNo || it?.uuid || it?.id;
   const key = belgeNo || (externalId ? String(externalId) : null);
   return key ? `invoice_${key.replace(/[/\\]/g, "_")}` : null;
-}
-
-function despatchDocIdFromBelgeNo(belgeNo) {
-  const safe = String(belgeNo || "").replace(/[/\\]/g, "_").trim();
-  if (!safe) return null;
-  return `despatch_${safe}`;
 }
 
 function normalizeListItems(resp) {
@@ -532,17 +531,14 @@ function buildDespatchPayloadFromPortalItem(it, fallbackBelgeNo) {
  * @returns {"cachedValid"|"matchedNew"|"notFound"|"portalError"|"ublFailed"|"writtenNoUbl"|"writtenWithUbl"}
  */
 export async function processDespatchTarget(vknTckn, belgeNo, issueDateYmd) {
-  const docId = despatchDocIdFromBelgeNo(belgeNo);
-  if (!docId) return "notFound";
+  const aliasDocId = despatchDocIdFromBelgeNo(belgeNo);
+  if (!aliasDocId) return "notFound";
 
-  const docRef = db.collection("qnb_docs").doc(docId);
-  const cached = await docRef.get();
-  if (cached.exists) {
-    const cd = cached.data() || {};
-    const hasEttn = ETTN_REGEX.test(String(cd.ettn || "").trim());
-    const hasUbl =
-      typeof cd.contentUbl === "string" && looksLikeDespatchXml(cd.contentUbl);
-    if (hasEttn && hasUbl) return "cachedValid";
+  // Kısa veya tam no ile mevcut cache (canonical veya alias) varsa atla.
+  const cachedFromRead = await readDespatchFromQnbDocs(belgeNo);
+  if (cachedFromRead?.contentUbl && looksLikeDespatchXml(cachedFromRead.contentUbl)) {
+    const ettnCached = await readEttnFromQnbDocsForDespatch(belgeNo);
+    if (ettnCached && ETTN_REGEX.test(ettnCached)) return "cachedValid";
   }
 
   const found = await findDespatchInPortal(vknTckn, belgeNo, {
@@ -561,8 +557,28 @@ export async function processDespatchTarget(vknTckn, belgeNo, issueDateYmd) {
     return "notFound";
   }
 
+  const portalBelgeNo = itemBelgeNo(found.item);
+  const canonicalRaw =
+    portalBelgeNo && String(portalBelgeNo).trim() !== ""
+      ? String(portalBelgeNo).trim()
+      : String(belgeNo).trim();
+  const canonicalDocId = despatchDocIdFromBelgeNo(canonicalRaw);
+  if (!canonicalDocId) return "notFound";
+
   const payload = buildDespatchPayloadFromPortalItem(found.item, belgeNo);
-  await docRef.set(payload, { merge: true });
+  payload.belgeNo = canonicalRaw;
+  if (belgeNoKey(belgeNo) !== belgeNoKey(canonicalRaw)) {
+    payload.belgeNoCanonical = canonicalRaw;
+    payload.belgeNoAlias = String(belgeNo).trim();
+  }
+
+  const canonicalRef = db.collection("qnb_docs").doc(canonicalDocId);
+  await canonicalRef.set(payload, { merge: true });
+
+  // PDF sekmesi Flutter'da despatch_<kısaNo> aradığı için kısa no alias zorunlu.
+  if (aliasDocId !== canonicalDocId) {
+    await db.collection("qnb_docs").doc(aliasDocId).set(payload, { merge: true });
+  }
 
   const ettn = payload.ettn;
   if (!ettn) return "writtenNoUbl";
@@ -580,15 +596,16 @@ export async function processDespatchTarget(vknTckn, belgeNo, issueDateYmd) {
   if (!fetched?.contentUbl || !looksLikeDespatchXml(fetched.contentUbl)) {
     return "ublFailed";
   }
-  await docRef.set(
-    {
-      contentUbl: fetched.contentUbl,
-      ublParsed: fetched.ublParsed || null,
-      contentFetchedAt: FieldValue.serverTimestamp(),
-      updatedAt: FieldValue.serverTimestamp(),
-    },
-    { merge: true }
-  );
+  const ublPatch = {
+    contentUbl: fetched.contentUbl,
+    ublParsed: fetched.ublParsed || null,
+    contentFetchedAt: FieldValue.serverTimestamp(),
+    updatedAt: FieldValue.serverTimestamp(),
+  };
+  await canonicalRef.set(ublPatch, { merge: true });
+  if (aliasDocId !== canonicalDocId) {
+    await db.collection("qnb_docs").doc(aliasDocId).set(ublPatch, { merge: true });
+  }
   return "writtenWithUbl";
 }
 

@@ -42,6 +42,7 @@ async function ensureDespatchesFromInvoiceAndPortal(docId, invData, vknTckn) {
     let contentUbl = null;
     let ublParsed = null;
     let ettn = null;
+    let belgeNoCanonical = null;
     const ettnFromQnbStore = await readEttnFromQnbDocsForDespatch(belgeNo);
 
     const existing = await refDoc.get();
@@ -49,6 +50,7 @@ async function ensureDespatchesFromInvoiceAndPortal(docId, invData, vknTckn) {
       const data = existing.data();
       if (data.contentUbl) contentUbl = data.contentUbl;
       if (data.ublParsed) ublParsed = data.ublParsed;
+      if (data.belgeNoCanonical) belgeNoCanonical = String(data.belgeNoCanonical).trim();
       if (data.ettn) {
         const t = String(data.ettn).trim();
         if (/^[0-9A-Fa-f-]{30,}$/.test(t)) ettn = t;
@@ -63,6 +65,7 @@ async function ensureDespatchesFromInvoiceAndPortal(docId, invData, vknTckn) {
         if (fetched?.contentUbl) {
           contentUbl = fetched.contentUbl;
           ublParsed = fetched.ublParsed || null;
+          if (fetched.belgeNoCanonical) belgeNoCanonical = String(fetched.belgeNoCanonical).trim();
           const da = fetched.ublParsed?.DespatchAdvice;
           const rawUuid = da?.UUID ?? da?.Uuid ?? da?.uuid;
           const ettnFromFetched =
@@ -73,6 +76,7 @@ async function ensureDespatchesFromInvoiceAndPortal(docId, invData, vknTckn) {
             {
               invoiceId: docId,
               belgeNo,
+              ...(belgeNoCanonical ? { belgeNoCanonical } : {}),
               issueDate,
               ettn: ettn || null,
               contentUbl,
@@ -93,6 +97,7 @@ async function ensureDespatchesFromInvoiceAndPortal(docId, invData, vknTckn) {
         {
           invoiceId: docId,
           belgeNo,
+          ...(belgeNoCanonical ? { belgeNoCanonical } : {}),
           issueDate,
           ettn: ettn || null,
           updatedAt: FieldValue.serverTimestamp(),
@@ -124,9 +129,14 @@ async function ensureDespatchesFromInvoiceAndPortal(docId, invData, vknTckn) {
       }
     }
 
+    // PDF fetch için canonical tercih (qnb_docs/despatch_<canonical> birincil).
+    const displayBelgeNo = belgeNoCanonical || belgeNo;
     relatedDespatches.push({
       id: despatchDocId,
-      belgeNo,
+      belgeNo: displayBelgeNo,
+      ...(belgeNoCanonical && belgeNoCanonical !== belgeNo
+        ? { belgeNoOriginal: belgeNo, belgeNoCanonical }
+        : {}),
       issueDate,
       belgeOzet,
     });
@@ -180,6 +190,8 @@ export const getInvoiceRelatedDespatches = onRequest(
         const data = d.data();
         const id = d.id;
         const belgeNo = (data.belgeNo ?? data.belgeNoStr ?? "").toString().trim();
+        let belgeNoCanonical =
+          data.belgeNoCanonical != null ? String(data.belgeNoCanonical).trim() : "";
         const issueDate = data.issueDate ?? null;
 
         let belgeOzet = null;
@@ -213,6 +225,10 @@ export const getInvoiceRelatedDespatches = onRequest(
                 ublParsed: fetched.ublParsed || null,
                 updatedAt: FieldValue.serverTimestamp(),
               };
+              if (fetched.belgeNoCanonical) {
+                belgeNoCanonical = String(fetched.belgeNoCanonical).trim();
+                update.belgeNoCanonical = belgeNoCanonical;
+              }
               const da = fetched.ublParsed?.DespatchAdvice;
               const rawUuid = da?.UUID ?? da?.Uuid ?? da?.uuid;
               const ettnFromFetched =
@@ -239,9 +255,13 @@ export const getInvoiceRelatedDespatches = onRequest(
           }
         }
 
+        const displayBelgeNo = belgeNoCanonical || belgeNo || id;
         relatedDespatches.push({
           id,
-          belgeNo: belgeNo || id,
+          belgeNo: displayBelgeNo,
+          ...(belgeNoCanonical && belgeNo && belgeNoCanonical !== belgeNo
+            ? { belgeNoOriginal: belgeNo, belgeNoCanonical }
+            : {}),
           issueDate,
           belgeOzet,
         });

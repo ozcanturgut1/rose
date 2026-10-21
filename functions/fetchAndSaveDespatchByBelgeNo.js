@@ -1,6 +1,10 @@
 import { onRequest } from "firebase-functions/v2/https";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { fetchDespatchUblByBelgeNo, fetchDespatchUblByEttn } from "./enrichInvoiceWithRelatedDespatches.js";
+import {
+  belgeNoKey,
+  despatchDocIdFromBelgeNo,
+} from "./qnbDespatchPortalLookup.js";
 
 const db = getFirestore();
 
@@ -94,9 +98,6 @@ export const fetchAndSaveDespatchByBelgeNo = onRequest(
         });
       }
 
-      const docId = `despatch_${String(belgeNo).replace(/[/\\]/g, "_")}`;
-      const ref = db.collection("qnb_docs").doc(docId);
-
       const da = fetched.ublParsed?.DespatchAdvice;
       const rawUuid = da?.UUID ?? da?.Uuid ?? da?.uuid;
       const ettn =
@@ -104,27 +105,43 @@ export const fetchAndSaveDespatchByBelgeNo = onRequest(
           ? String(typeof rawUuid === "object" && rawUuid["#text"] != null ? rawUuid["#text"] : rawUuid).trim()
           : null;
 
-      await ref.set(
-        {
-          type: "despatch",
-          belgeNo,
-          externalId: ettn || belgeNo,
-          ettn: ettn || null,
-          status: "PENDING",
-          qnbBelgeTuru: "IRSALIYE",
-          contentUbl: fetched.contentUbl,
-          ublParsed: fetched.ublParsed || null,
-          updatedAt: FieldValue.serverTimestamp(),
-          createdAt: FieldValue.serverTimestamp(),
-        },
-        { merge: true }
-      );
+      const canonical =
+        fetched.belgeNoCanonical && String(fetched.belgeNoCanonical).trim() !== ""
+          ? String(fetched.belgeNoCanonical).trim()
+          : belgeNo;
+      const aliasDocId = despatchDocIdFromBelgeNo(belgeNo);
+      const canonicalDocId = despatchDocIdFromBelgeNo(canonical);
+      const payload = {
+        type: "despatch",
+        belgeNo: canonical,
+        externalId: ettn || canonical,
+        ettn: ettn || null,
+        status: "PENDING",
+        qnbBelgeTuru: "IRSALIYE",
+        contentUbl: fetched.contentUbl,
+        ublParsed: fetched.ublParsed || null,
+        updatedAt: FieldValue.serverTimestamp(),
+        createdAt: FieldValue.serverTimestamp(),
+      };
+      if (belgeNoKey(belgeNo) !== belgeNoKey(canonical)) {
+        payload.belgeNoCanonical = canonical;
+        payload.belgeNoAlias = belgeNo;
+      }
 
+      if (canonicalDocId) {
+        await db.collection("qnb_docs").doc(canonicalDocId).set(payload, { merge: true });
+      }
+      if (aliasDocId && aliasDocId !== canonicalDocId) {
+        await db.collection("qnb_docs").doc(aliasDocId).set(payload, { merge: true });
+      }
+
+      const docId = canonicalDocId || aliasDocId;
       console.log("[fetchAndSaveDespatchByBelgeNo] Kaydedildi: docId=", docId);
 
       return res.status(200).json({
         ok: true,
-        belgeNo,
+        belgeNo: canonical,
+        ...(belgeNoKey(belgeNo) !== belgeNoKey(canonical) ? { belgeNoAlias: belgeNo } : {}),
         docId,
         message: "Portaldan UBL/XML indirildi ve Firestore'a kaydedildi (qnb_docs)",
         contentLength: fetched.contentUbl.length,
