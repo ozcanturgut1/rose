@@ -81,7 +81,292 @@ String? _ublItemDescriptionText(dynamic raw) {
   return parts.join(' ');
 }
 
+const String _ekOzellikOnek = 'Item/AdditionalItemProperty/';
+
+const List<String> _kargoSutunlari = [
+  'kargo/atfTarih',
+  'kargo/atfNo',
+  'kargo/musteriIrsNo',
+  'kargo/gonderenAlici',
+  'kargo/adet',
+  'kargo/birim',
+  'kargo/mamulCinsi',
+  'kargo/kgDesi',
+  'kargo/birimFiyat',
+  'kargo/tutar',
+];
+
+String? _ekOzellikDegeri(Map<String, dynamic> ozellik) {
+  final value = _ublXmlScalarText(_ublFirst(ozellik['Value']))?.trim();
+  if (value != null && value.isNotEmpty) return value;
+  final q = _ublFirst(ozellik['ValueQuantity']);
+  if (q == null) return null;
+  String metin = '';
+  String? birim;
+  if (q is Map) {
+    final qm = Map<String, dynamic>.from(q);
+    metin = _ublXmlScalarText(qm)?.trim() ?? '';
+    birim = (qm['@_unitCode'] ?? qm['@_UnitCode'])?.toString();
+  } else {
+    metin = q.toString().trim();
+  }
+  if (metin.isEmpty) return null;
+  if (birim != null && birim.trim().isNotEmpty) return '$metin ${birim.trim()}';
+  return metin;
+}
+
+final RegExp _notSutunX = RegExp(r'^x([^x\s][^x]*?)x\s*(\S.*)$', caseSensitive: false);
+final RegExp _notSutunBosluk = RegExp(
+  r'^([\p{L}\p{N}_./-]{2,24})\s+(\S.*)$',
+  unicode: true,
+);
+
+bool _buyukHarfEtiket(String s) {
+  if (!RegExp(r'^[\p{L}\p{N}_./-]+$', unicode: true).hasMatch(s)) return false;
+  for (final r in s.runes) {
+    final ch = String.fromCharCode(r);
+    if (RegExp(r'\p{L}', unicode: true).hasMatch(ch) && ch != ch.toUpperCase()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+const List<(String, String)> _bilinenNotEtiketleri = [
+  ('Gönderen / Alıcı', 'GONDERENALICI'),
+  ('Gönderen/Alıcı', 'GONDERENALICI'),
+  ('Müşteri İrsaliye No', 'MUSTERIIRSNO'),
+  ('Müşteri İrsaliye', 'MUSTERIIRSNO'),
+  ('Müşteri İrs.No', 'MUSTERIIRSNO'),
+  ('Müşteri Irs.No', 'MUSTERIIRSNO'),
+  ('Alıcı Ünvanı', 'ALICI'),
+  ('Alici Unvani', 'ALICI'),
+  ('Alıcı Unvan', 'ALICI'),
+  ('Alıcı Adı', 'ALICI'),
+  ('ATF Tarihi', 'ATFTARIH'),
+  ('ATF Tarih', 'ATFTARIH'),
+  ('Mamül Cinsi', 'MAMULCINSI'),
+  ('Mamul Cinsi', 'MAMULCINSI'),
+  ('Kg Desi', 'KILO'),
+  ('ATF No', 'ATFNO'),
+  ('Gönderici', 'GONDERICI'),
+  ('Gönderen', 'GONDEREN'),
+  ('Alıcı', 'ALICI'),
+  ('Alici', 'ALICI'),
+];
+
+String _etiketSonrasi(String metin, String etiket) {
+  var rest = metin.substring(etiket.length).trim();
+  rest = rest.replaceFirst(RegExp(r'^[:：=\-]'), '').trim();
+  return rest;
+}
+
+(String, String)? _bilinenNotEtiketi(String metin) {
+  final lower = metin.toLowerCase();
+  for (final et in _bilinenNotEtiketleri) {
+    final ad = et.$1.toLowerCase();
+    if (!lower.startsWith(ad)) continue;
+    final rest = _etiketSonrasi(metin, et.$1);
+    if (rest.isNotEmpty) return (et.$2, rest);
+  }
+  return null;
+}
+
+(String, String)? _satirNotuSutunu(String note) {
+  final t = note.trim();
+  if (t.isEmpty) return null;
+  final bilinen = _bilinenNotEtiketi(t);
+  if (bilinen != null) return bilinen;
+  final xm = _notSutunX.firstMatch(t);
+  if (xm != null) {
+    final ad = xm.group(1)!.trim();
+    final deger = xm.group(2)!.trim();
+    if (ad.isNotEmpty && deger.isNotEmpty) return (ad, deger);
+  }
+  final bm = _notSutunBosluk.firstMatch(t);
+  if (bm != null) {
+    final ad = bm.group(1)!.trim();
+    final deger = bm.group(2)!.trim();
+    if (_buyukHarfEtiket(ad) && deger.isNotEmpty) return (ad, deger);
+  }
+  return null;
+}
+
+void _satirNotlariniSutunlaraAyir(Map<String, String> out, List<String> notes) {
+  final serbest = <String>[];
+  for (final note in notes) {
+    for (final parca in note.split('|')) {
+      final t = parca.trim();
+      if (t.isEmpty) continue;
+      final sutun = _satirNotuSutunu(t);
+      if (sutun == null) {
+        serbest.add(t);
+        continue;
+      }
+      final anahtar = '$_ekOzellikOnek${sutun.$1}';
+      final onceki = out[anahtar];
+      if (onceki == null || onceki.isEmpty) {
+        out[anahtar] = sutun.$2;
+      } else if (!onceki.split(' | ').contains(sutun.$2)) {
+        out[anahtar] = '$onceki | ${sutun.$2}';
+      }
+    }
+  }
+  if (serbest.isNotEmpty) {
+    _kalemTabloHucreEkle(out, 'Note', serbest.join(' | '));
+  }
+}
+
+void _ekKalemOzellikleriniEkle(Map<String, String> out, dynamic itemRaw) {
+  if (itemRaw is! Map) return;
+  final raw = itemRaw['AdditionalItemProperty'];
+  if (raw == null) return;
+  final list = raw is List ? raw : [raw];
+  for (final e in list) {
+    if (e is! Map) continue;
+    final m = Map<String, dynamic>.from(e);
+    final ad = _ublXmlScalarText(_ublFirst(m['Name']))?.trim();
+    final deger = _ekOzellikDegeri(m);
+    if (ad == null || ad.isEmpty || deger == null || deger.isEmpty) continue;
+    final anahtar = '$_ekOzellikOnek$ad';
+    final onceki = out[anahtar];
+    if (onceki == null || onceki.isEmpty) {
+      out[anahtar] = deger;
+    } else if (!onceki.split(' | ').contains(deger)) {
+      out[anahtar] = '$onceki | $deger';
+    }
+  }
+}
+
+String _normEtiket(String s) {
+  return s
+      .trim()
+      .toUpperCase()
+      .replaceAll('İ', 'I')
+      .replaceAll('Ş', 'S')
+      .replaceAll('Ğ', 'G')
+      .replaceAll('Ü', 'U')
+      .replaceAll('Ö', 'O')
+      .replaceAll('Ç', 'C')
+      .replaceAll(RegExp(r'[^A-Z0-9]'), '');
+}
+
+String? _ozellikDegeri(Map<String, String> h, List<String> adlar) {
+  for (final ad in adlar) {
+    final hedef = _normEtiket(ad);
+    for (final e in h.entries) {
+      if (!e.key.startsWith(_ekOzellikOnek)) continue;
+      final deger = e.value.trim();
+      if (deger.isNotEmpty && _normEtiket(e.key.substring(_ekOzellikOnek.length)) == hedef) {
+        return deger;
+      }
+    }
+  }
+  return null;
+}
+
+bool _kargoIzleriVar(Map<String, String> h) {
+  final tesno = _ozellikDegeri(h, const ['TESNO', 'ATFNO', 'ATF']);
+  final adet = _ozellikDegeri(h, const ['ADET']);
+  final birim = _ozellikDegeri(h, const ['BIRIM']);
+  return tesno != null || (adet != null && birim != null);
+}
+
+String _gosterimTarihi(String? raw) {
+  final t = raw?.trim() ?? '';
+  if (t.isEmpty) return '';
+  final m = RegExp(r'^(\d{4})-(\d{2})-(\d{2})').firstMatch(t);
+  if (m != null) return '${m.group(3)}.${m.group(2)}.${m.group(1)}';
+  return t;
+}
+
+String _musteriIrsaliyeNo(Map<String, String> h, String atfNo) {
+  final ozel = _ozellikDegeri(h, const [
+    'MUSIRSNO',
+    'MUSTERIIRSNO',
+    'MUSTERIIRSALIYENO',
+    'MUSTERIIRSALIYE',
+    'ALICIIRSNO',
+  ]);
+  if (ozel != null && ozel != atfNo) return ozel;
+  // Ergül notundaki IRSALIYE, nakliyecinin iç numarasıdır (219, 1951).
+  if (_ozellikDegeri(h, const ['TESNO', 'TESALICI', 'TESGONDEREN']) != null) return '';
+  final genel = _ozellikDegeri(h, const ['IRSALIYENO', 'IRSALIYE', 'IRSNO']);
+  if (genel != null && genel != atfNo) return genel;
+  return '';
+}
+
+Map<String, String> _kargoHucreleri(Map<String, String> h) {
+  final faturaAlicisi = h['__faturaAlicisi'];
+  final taraf = _teslimFirmasi(h, faturaAlicisi);
+  final atfNo = _ozellikDegeri(h, const ['TESNO', 'ATFNO', 'ATF']) ?? '';
+  final musteriIrs = _musteriIrsaliyeNo(h, atfNo);
+  return {
+    'kargo/atfTarih': _gosterimTarihi(
+      _ozellikDegeri(h, const ['TESTARIH', 'ATFTARIH', 'ATFTARIHI', 'TARIH']),
+    ),
+    'kargo/atfNo': atfNo,
+    'kargo/musteriIrsNo': musteriIrs,
+    'kargo/gonderenAlici': taraf,
+    'kargo/adet': _ozellikDegeri(h, const ['ADET']) ?? '',
+    'kargo/birim': _ozellikDegeri(h, const ['BIRIM']) ?? '',
+    'kargo/mamulCinsi':
+        _ozellikDegeri(h, const ['MAMULCINSI', 'MAMUL', 'CINSI']) ?? (h['Item/Name'] ?? ''),
+    'kargo/kgDesi':
+        _ozellikDegeri(h, const ['KILO', 'KG']) ?? _ozellikDegeri(h, const ['DESI', 'KGDS']) ?? '',
+    'kargo/birimFiyat': h['Price/PriceAmount'] ?? '',
+    'kargo/tutar': h['LineExtensionAmount'] ?? '',
+  };
+}
+
+Map<String, String> _satirHucreHaritasi(Map<String, dynamic> satir) {
+  final raw = satir['_ublHucreleri'];
+  if (raw is! Map) return {};
+  return Map<String, dynamic>.from(raw).map(
+    (k, v) => MapEntry(k.toString(), v?.toString() ?? ''),
+  );
+}
+
+/// Kargo satır notu bu kolonlara ayrılıyorsa tabloyu ekteki görünüme indirger.
+List<String>? _kargoSutunlarinaCevir(List<Map<String, dynamic>> rows) {
+  final haritalar = <Map<String, String>>[];
+  for (final r in rows) {
+    final h = _satirHucreHaritasi(r);
+    final faturaAlicisi = r['_faturaAlicisi']?.toString().trim();
+    if (faturaAlicisi != null && faturaAlicisi.isNotEmpty) {
+      h['__faturaAlicisi'] = faturaAlicisi;
+    }
+    final note = h.remove('Note');
+    if (note != null && note.trim().isNotEmpty) {
+      _satirNotlariniSutunlaraAyir(h, [note]);
+    }
+    haritalar.add(h);
+  }
+  if (!haritalar.any(_kargoIzleriVar)) return null;
+  for (var i = 0; i < rows.length; i++) {
+    rows[i]['_ublHucreleri'] = _kargoHucreleri(haritalar[i]);
+  }
+  return _kargoSutunlari;
+}
+
 String _kalemUblSutunBasligiTr(String anahtar) {
+  const kargoBaslik = <String, String>{
+    'kargo/atfTarih': 'ATF Tarih',
+    'kargo/atfNo': 'ATF No',
+    'kargo/musteriIrsNo': 'Müşteri İrs.No',
+    'kargo/gonderenAlici': 'Gönderen / Alıcı',
+    'kargo/adet': 'Adet',
+    'kargo/birim': 'Birim',
+    'kargo/mamulCinsi': 'Mamül Cinsi',
+    'kargo/kgDesi': 'Kg Desi',
+    'kargo/birimFiyat': 'Birim Fiyat',
+    'kargo/tutar': 'Tutar',
+  };
+  final kargo = kargoBaslik[anahtar];
+  if (kargo != null) return kargo;
+  if (anahtar.startsWith(_ekOzellikOnek)) {
+    return anahtar.substring(_ekOzellikOnek.length);
+  }
   const tr = <String, String>{
     'Note': 'Satır notu',
     'OrderLineReference/ID': 'Sipariş satır referansı',
@@ -253,6 +538,83 @@ Map<String, dynamic> _ublInvoiceLineVergiOzet(Map<String, dynamic> line, String?
     out['vergiKodlariMetni'] = kodParcalari.join(' · ');
   }
   return out;
+}
+
+String? _partyUnvan(dynamic partyRaw) {
+  final party = _ublFirst(partyRaw);
+  if (party is! Map) return null;
+  final p = Map<String, dynamic>.from(party);
+  final inner = _ublFirst(p['Party']);
+  final base = inner is Map ? Map<String, dynamic>.from(inner) : p;
+  final pnRaw = _ublFirst(base['PartyName']);
+  if (pnRaw is Map) {
+    final name = _ublXmlScalarText(Map<String, dynamic>.from(pnRaw)['Name'])?.trim();
+    if (name != null && name.isNotEmpty) return name;
+  }
+  final nameDuz = _ublXmlScalarText(base['PartyName'])?.trim();
+  if (nameDuz != null && nameDuz.isNotEmpty) return nameDuz;
+  final person = _ublFirst(base['Person']);
+  if (person is Map) {
+    final pm = Map<String, dynamic>.from(person);
+    final full = [
+      _ublXmlScalarText(pm['FirstName']),
+      _ublXmlScalarText(pm['FamilyName']),
+    ].whereType<String>().map((s) => s.trim()).where((s) => s.isNotEmpty).join(' ');
+    if (full.isNotEmpty) return full;
+  }
+  return null;
+}
+
+String? _tarihMetni(dynamic raw) {
+  final t = _ublXmlScalarText(raw)?.trim() ?? '';
+  if (t.isEmpty) return null;
+  final m = RegExp(r'^(\d{4})-(\d{2})-(\d{2})').firstMatch(t);
+  if (m != null) return '${m.group(3)}.${m.group(2)}.${m.group(1)}';
+  return t;
+}
+
+void _ozellikYazBosIse(Map<String, String> out, String ad, String? deger) {
+  final t = deger?.trim() ?? '';
+  if (t.isEmpty) return;
+  final anahtar = '$_ekOzellikOnek$ad';
+  if ((out[anahtar] ?? '').trim().isEmpty) out[anahtar] = t;
+}
+
+/// Satırdaki teslim alan (alıcı) ve irsaliye referansı. Nakliye faturasında
+/// malın teslim edildiği yer bu tarafta yazar.
+void _satirTeslimBilgisiniEkle(Map<String, String> out, Map<String, dynamic> line) {
+  void teslimOku(Map<String, dynamic> dm) {
+    final unvan = _partyUnvan(dm['DeliveryParty']) ?? _partyUnvan(dm['DeliveryCustomerParty']);
+    _ozellikYazBosIse(out, 'ALICI', unvan);
+    _ozellikYazBosIse(out, 'ATFTARIH', _tarihMetni(dm['ActualDeliveryDate']));
+    final despatches = dm['Despatch'];
+    final dlist = despatches is List ? despatches : (despatches == null ? const [] : [despatches]);
+    for (final ds in dlist) {
+      if (ds is! Map) continue;
+      final sm = Map<String, dynamic>.from(ds);
+      final ref = _ublFirst(sm['DespatchDocumentReference']);
+      if (ref is Map) {
+        final rm = Map<String, dynamic>.from(ref);
+        _ozellikYazBosIse(out, 'MUSTERIIRSNO', _ublXmlScalarText(rm['ID']));
+        _ozellikYazBosIse(out, 'ATFTARIH', _tarihMetni(rm['IssueDate']));
+      }
+    }
+  }
+
+  final deliveries = line['Delivery'];
+  final list = deliveries is List ? deliveries : (deliveries == null ? const [] : [deliveries]);
+  for (final d in list) {
+    if (d is Map) teslimOku(Map<String, dynamic>.from(d));
+  }
+
+  final refs = line['DespatchDocumentReference'];
+  final rlist = refs is List ? refs : (refs == null ? const [] : [refs]);
+  for (final r in rlist) {
+    if (r is! Map) continue;
+    final rm = Map<String, dynamic>.from(r);
+    _ozellikYazBosIse(out, 'MUSTERIIRSNO', _ublXmlScalarText(rm['ID']));
+    _ozellikYazBosIse(out, 'ATFTARIH', _tarihMetni(rm['IssueDate']));
+  }
 }
 
 String? _ublOrderLineReferenceId(dynamic olr) {
@@ -446,6 +808,7 @@ Map<String, String> _flattenBelgeOzetInvoiceLineForTablo(Map<String, dynamic> li
     if (b != null && b.isNotEmpty) {
       _kalemTabloHucreEkle(out, 'Item/BuyersItemIdentification/ID', b);
     }
+    _ekKalemOzellikleriniEkle(out, im);
   }
 
   final ta = line['TaxAmount'];
@@ -492,10 +855,8 @@ Map<String, String> _flattenBelgeOzetInvoiceLineForTablo(Map<String, dynamic> li
 Map<String, String> _flattenUblInvoiceLineForTablo(Map<String, dynamic> line, String? docCur) {
   final out = <String, String>{};
 
-  final notes = _ublInvoiceLineNotes(line['Note']);
-  if (notes.isNotEmpty) {
-    _kalemTabloHucreEkle(out, 'Note', notes.join(' | '));
-  }
+  _satirNotlariniSutunlaraAyir(out, _ublInvoiceLineNotes(line['Note']));
+  _satirTeslimBilgisiniEkle(out, line);
 
   _kalemTabloHucreEkle(out, 'OrderLineReference/ID', _ublOrderLineReferenceId(line['OrderLineReference']));
 
@@ -514,6 +875,7 @@ Map<String, String> _flattenUblInvoiceLineForTablo(Map<String, dynamic> line, St
       'Item/BuyersItemIdentification/ID',
       _ublItemIdentificationId(im['BuyersItemIdentification']),
     );
+    _ekKalemOzellikleriniEkle(out, im);
   }
 
   final qty = line['InvoicedQuantity'];
@@ -642,24 +1004,55 @@ int _kalemUblSutunSiralama(String k) {
 }
 
 List<String> _kalemUblSutunAnahtarlari(List<Map<String, dynamic>> satirlar) {
-  final tum = <String>{};
+  final gorulen = <String>[];
+  final kume = <String>{};
   for (final r in satirlar) {
     final m = r['_ublHucreleri'];
-    if (m is Map) {
-      tum.addAll(m.keys.map((e) => e.toString()));
+    if (m is! Map) continue;
+    for (final k in m.keys) {
+      final s = k.toString();
+      if (kume.add(s)) gorulen.add(s);
     }
   }
-  final liste = tum.toList()..sort((a, b) {
+  final bilinen = <String>[];
+  final ekstra = <String>[];
+  for (final k in gorulen) {
+    if (_kalemUblSutunSiralama(k) < 1000) {
+      bilinen.add(k);
+    } else {
+      ekstra.add(k);
+    }
+  }
+  bilinen.sort((a, b) {
     final da = _kalemUblSutunSiralama(a);
     final db = _kalemUblSutunSiralama(b);
     if (da != db) return da.compareTo(db);
     return a.compareTo(b);
   });
-  return liste;
+  const urunSonrasi = <String>[
+    'Item/BuyersItemIdentification/ID',
+    'Item/SellersItemIdentification/ID',
+    'Item/Description',
+    'Item/Name',
+  ];
+  var yer = 0;
+  for (final aday in urunSonrasi) {
+    final i = bilinen.indexOf(aday);
+    if (i >= 0) {
+      yer = i + 1;
+      break;
+    }
+  }
+  bilinen.insertAll(yer, ekstra);
+  return bilinen;
 }
 
 TextAlign _kalemUblSutunHizasi(String anahtar) {
-  if (anahtar == 'InvoicedQuantity' ||
+  if (anahtar == 'kargo/adet' ||
+      anahtar == 'kargo/kgDesi' ||
+      anahtar == 'kargo/birimFiyat' ||
+      anahtar == 'kargo/tutar' ||
+      anahtar == 'InvoicedQuantity' ||
       anahtar == 'DeliveredQuantity' ||
       anahtar == 'OutstandingQuantity' ||
       anahtar.contains('Amount') ||
@@ -671,6 +1064,8 @@ TextAlign _kalemUblSutunHizasi(String anahtar) {
 }
 
 double _kalemDinamikSutunGenisligi(String anahtar) {
+  if (anahtar == 'kargo/gonderenAlici' || anahtar == 'kargo/mamulCinsi') return 200;
+  if (anahtar.startsWith('kargo/')) return 108;
   if (anahtar == 'Item/Description') {
     return (120.0 + anahtar.length * 2.0).clamp(140.0, 320.0);
   }
@@ -745,6 +1140,7 @@ List<Map<String, dynamic>> _faturaKalemleri(Map<String, dynamic> data) {
       for (var i = 0; i < rows.length && i < ublLines.length; i++) {
         _hucreleriDoldur(rows[i], _flattenUblInvoiceLineForTablo(ublLines[i], docCur));
       }
+      _damgalaFaturaAlicisi(data, rows);
       return rows;
     }
   }
@@ -844,7 +1240,52 @@ List<Map<String, dynamic>> _faturaKalemleri(Map<String, dynamic> data) {
       '_ublHucreleri': ublHucreleri,
     });
   }
+  _damgalaFaturaAlicisi(data, out);
   return out;
+}
+
+/// E-faturayı alan cari. Nakliye faturasında bu, malın teslim edildiği firma değildir.
+String? _faturaAliciUnvani(Map<String, dynamic> data) {
+  final upRaw = data['ublParsed'];
+  if (upRaw is! Map) return null;
+  final invRaw = Map<String, dynamic>.from(upRaw)['Invoice'];
+  if (invRaw is! Map) return null;
+  return _partyUnvan(Map<String, dynamic>.from(invRaw)['AccountingCustomerParty']);
+}
+
+void _damgalaFaturaAlicisi(Map<String, dynamic> data, List<Map<String, dynamic>> rows) {
+  final ad = _faturaAliciUnvani(data)?.trim();
+  if (ad == null || ad.isEmpty) return;
+  for (final r in rows) {
+    r['_faturaAlicisi'] = ad;
+  }
+}
+
+bool _ayniUnvan(String a, String b) {
+  final na = _normEtiket(a);
+  final nb = _normEtiket(b);
+  if (na.length < 4 || nb.length < 4) return false;
+  return na == nb || na.contains(nb) || nb.contains(na);
+}
+
+/// Satırdaki karşı firma. Faturayı alan cari (ör. TEKNİK FİLAMENT) her satırda
+/// aynıdır; nakliyeci malın diğer tarafını gidişte TESALICI, dönüşte TESGONDEREN
+/// ve her iki durumda ACIKLAMA alanına yazar.
+String _teslimFirmasi(Map<String, String> h, String? faturaAlicisi) {
+  String? disarida(List<String> adlar) {
+    final v = _ozellikDegeri(h, adlar)?.trim() ?? '';
+    if (v.isEmpty) return null;
+    if (faturaAlicisi != null && faturaAlicisi.isNotEmpty && _ayniUnvan(v, faturaAlicisi)) {
+      return null;
+    }
+    return v;
+  }
+
+  final alici = disarida(const ['TESALICI', 'TESSEVKALICI', 'GONDERENALICI']);
+  final gonderen = disarida(const ['TESGONDEREN', 'GONDEREN', 'GONDERICI']);
+  final aciklama = disarida(const ['ACIKLAMA']);
+  if (alici != null && gonderen != null) return aciklama ?? alici;
+  return alici ?? gonderen ?? aciklama ?? '';
 }
 
 /// İrsaliye satırı: UBL `Note` ve `Item/Description` birleşik metin.
@@ -950,11 +1391,9 @@ Map<String, String> _despatchSatirHucreleri(Map<String, dynamic> line) {
       _ublItemIdentificationId(im['SellersItemIdentification']) ??
           im['SellersItemIdentification']?.toString(),
     );
+    _ekKalemOzellikleriniEkle(out, im);
   }
-  final notes = _ublInvoiceLineNotes(line['Note']);
-  if (notes.isNotEmpty) {
-    _kalemTabloHucreEkle(out, 'Note', notes.join(' | '));
-  }
+  _satirNotlariniSutunlaraAyir(out, _ublInvoiceLineNotes(line['Note']));
   void miktarAlani(String anahtar, dynamic qty, String? yedekBirim) {
     if (qty == null && (yedekBirim == null || yedekBirim.isEmpty)) return;
     String metin = '';
@@ -2654,7 +3093,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
         .whereType<Map>()
         .map((e) => Map<String, dynamic>.from(e))
         .toList();
-    final keys = _kalemUblSutunAnahtarlari(rows)
+    final keys = (_kargoSutunlarinaCevir(rows) ?? _kalemUblSutunAnahtarlari(rows))
         .map((k) => k.trim())
         .where((k) => k.isNotEmpty)
         .toList();

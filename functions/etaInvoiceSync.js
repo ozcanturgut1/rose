@@ -1385,6 +1385,87 @@ async function patchCurrencyFields(wPool, fatFisRefNo, opts) {
   }
 }
 
+const CARI_FIS_IFADE_BY_TIP = {
+  1: "ALIM",
+  2: "ALIM İADE",
+  3: "SATIŞ",
+  4: "SATIŞ İADE",
+  5: "YURT DIŞI SATIŞ",
+  7: "TEVKİFATLI SATIŞ",
+  8: "TEVKİFATLI ALIŞ",
+  9: "GİDER",
+  11: "YURT DIŞI ALIM",
+  12: "İHRAÇ KAYITLI SATIŞ",
+  13: "YANSITMA SATIŞ",
+};
+
+let cachedCariHarAciklamaLen;
+
+function cariFisIfadesi(fatTipNo, fatTipKod) {
+  const temiz = String(fatTipKod || "")
+    .trim()
+    .replace(/\s+FATURASI\s*$/iu, "")
+    .replace(/\s+FAT\.?\s*$/iu, "")
+    .trim();
+  if (temiz) return temiz;
+  return CARI_FIS_IFADE_BY_TIP[Number(fatTipNo) || 0] || "ALIM";
+}
+
+/**
+ * Cari hareket açıklaması: `{no} NO'LU {fiş tipi} FAT.İLE {stok kodları}`.
+ * Birden çok satırda stok kodları satır sırasıyla, tekrarsız eklenir.
+ */
+export function buildCariFisAciklama({ faturaNo, fatTipNo, fatTipKod, stokKodlari, maxLen } = {}) {
+  const no = String(faturaNo || "").trim();
+  const ifade = cariFisIfadesi(fatTipNo, fatTipKod);
+  const prefix = `${no} NO'LU ${ifade} FAT.İLE`;
+  const kodlar = [];
+  const seen = new Set();
+  for (const raw of stokKodlari || []) {
+    const kod = String(raw || "").trim();
+    if (!kod || seen.has(kod)) continue;
+    seen.add(kod);
+    kodlar.push(kod);
+  }
+  const limit = Number(maxLen) > 0 && Number(maxLen) < 4000 ? Number(maxLen) : 250;
+  let kullan = kodlar.slice();
+  const birlestir = (list) => (list.length ? `${prefix} ${list.join(", ")}` : prefix);
+  while (kullan.length && birlestir(kullan).length > limit) kullan.pop();
+  let text = birlestir(kullan);
+  if (text.length > limit) text = text.slice(0, limit);
+  return text;
+}
+
+async function cariHarAciklamaMaxLen(pool) {
+  if (cachedCariHarAciklamaLen) return cachedCariHarAciklamaLen;
+  const rs = await pool.request().query(`
+    SELECT CHARACTER_MAXIMUM_LENGTH AS n
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = N'dbo' AND TABLE_NAME = N'CARHAR' AND COLUMN_NAME = N'CARHARACIKLAMA'
+  `);
+  const n = Number(rs.recordset[0]?.n);
+  cachedCariHarAciklamaLen = Number.isFinite(n) && n > 0 ? n : 250;
+  return cachedCariHarAciklamaLen;
+}
+
+/** sp_Fatura_Kayit'in sabit "ALIM" metnini fiş tipi ve stok kodlarıyla değiştirir. */
+async function patchCariFisAciklama(wPool, fatFisRefNo, aciklama) {
+  const text = String(aciklama || "").trim();
+  const ref = Number(fatFisRefNo) || 0;
+  if (!text || !ref) return;
+  await wPool
+    .request()
+    .input("ref", sql.Int, ref)
+    .input("acik", sql.NVarChar(400), text)
+    .query(`
+      UPDATE h
+      SET h.CARHARACIKLAMA = @acik
+      FROM dbo.CARHAR h
+      INNER JOIN dbo.FATFIS f ON f.FATFISCARREFNO = h.CARHARREFNO
+      WHERE f.FATFISREFNO = @ref
+    `);
+}
+
 /** Dövizli fatura: FATFIS döviz alanlarını bağlı CARFIS / CARHAR satırına yansıtır (üretim ETA şablonu). */
 async function patchCariCurrencyFromFatFis(wPool, fatFisRefNo) {
   const rs = await wPool
@@ -2747,6 +2828,29 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
           WHERE FATHARREFNO = @ref AND FATHARSIRANO = @sira
         `);
     }
+  }
+
+  try {
+    const tipRs = await wPool
+      .request()
+      .input("n", sql.Int, Number(erpFaturaTipiNo) || 0)
+      .query(
+        "SELECT TOP 1 LTRIM(RTRIM(FATFTKOD)) AS kod FROM dbo.FATFISTIP WITH (NOLOCK) WHERE FATFTNO = @n"
+      );
+    const cariAciklama = buildCariFisAciklama({
+      faturaNo: belgeNo.slice(0, 16),
+      fatTipNo: erpFaturaTipiNo,
+      fatTipKod: tipRs.recordset[0]?.kod,
+      stokKodlari: lineMatches.map((m) => m.selectedStkKod),
+      maxLen: await cariHarAciklamaMaxLen(wPool),
+    });
+    await patchCariFisAciklama(wPool, fatFisRefNo, cariAciklama);
+  } catch (err) {
+    console.warn(
+      "syncApprovedInvoiceToEta: cari fiş açıklaması yazılamadı",
+      docId,
+      err?.message || err
+    );
   }
 
   await patchFatFisIrsaliyeAlanlari(wPool, fatFisRefNo, despatchesFromSubcol);
