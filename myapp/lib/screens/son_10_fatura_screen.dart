@@ -16,11 +16,18 @@ import 'invoice_pdf_review_screen.dart';
 ///
 /// **admin**: Portal `listGelenBelgeleriExt` + geliş tarihi + **Sorgula** + diğer araçlar.
 ///
-/// **ara_onay** / **nihai_onay** / **muhasebe**: Yalnızca Firestore; tarih/sorgu yok (sayfalı okuma).
+/// **ara_onay** / **ikinci_ara_onay** / **nihai_onay** / **muhasebe**: Yalnızca Firestore; tarih/sorgu yok (sayfalı okuma).
 /// Ekranda yalnızca liste + AppBar **Çıkış**.
 ///
 /// - `ara_onay` → `onayDurumu` boş
+/// - `ikinci_ara_onay` → aynı ara kuyruk. Birimi `erdem` olan kullanıcı kendisine atananları
+///   ve `suppliers/erdem` VKN’lerini görür.
 /// - `nihai_onay` → `onayDurumu == onaya sunuldu`
+///   Birimi `sinan` olan kullanıcı kendisine yöneltilen faturaları görür.
+///   Birimi `yasin` olan kullanıcı yöneltmesi olmayan (iplik, kumaş, giyim) ve kendisine
+///   manuel yöneltilen faturaları görür.
+///   `suppliers/sinan` ve `suppliers/yasin` içindeki VKN’ye ait, durumu boş
+///   faturalar portaldan doğrudan ilgili ekrana düşer.
 /// - `muhasebe` → açılır liste: arşiv bekliyor / onaylandı / reddedildi / onay bekliyor (Ara+Nihai kuyrukları)
 ///
 /// **Arşiv bekliyor**: nihai onay sonrası ETA fatura kaydı tamamlanmış, ancak fatura ve
@@ -30,7 +37,7 @@ import 'invoice_pdf_review_screen.dart';
 /// İrsaliyeleri `qnb_docs` önbelleğine almak (yalnız admin UI): **kamyon** ikonu veya
 /// ilgili butonlar → [QnbApi.syncAllDespatches].
 ///
-/// **ara_onay** + dolu [profileBirim]: yalnızca `suppliers/{birim}` belgesindeki VKN listesiyle
+/// **ara_onay** / **ikinci_ara_onay** + dolu [profileBirim]: yalnızca `suppliers/{birim}` belgesindeki VKN listesiyle
 /// eşleşen `supplierVkn` / `qnbRaw.gondericiVkn` faturaları gösterilir; yönlendirme `araOnayAtananUid` ile yapılır.
 class Son10FaturaScreen extends StatefulWidget {
   const Son10FaturaScreen({super.key, required this.api, this.userRole, this.profileBirim});
@@ -40,7 +47,7 @@ class Son10FaturaScreen extends StatefulWidget {
   /// [UserHomeRouter] → `user_profiles.role` (ör. `nihai_onay`, `ara_onay`).
   final String? userRole;
 
-  /// `user_profiles.birim` (ör. `iplik`). Yalnızca `ara_onay` ile `suppliers` süzmesi için.
+  /// `user_profiles.birim` (ör. `iplik`, `erdem`). Ara onay listesinde `suppliers` süzmesi için.
   final String? profileBirim;
 
   @override
@@ -96,15 +103,21 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
   /// Admin liste sayfalama: tek seferde bellekteki [items] dilimlenir.
   static const int _adminPageSize = 50;
 
-  /// admin | ara_onay | nihai_onay | muhasebe ([UserHomeRouter]).
+  /// admin | ara_onay | ikinci_ara_onay | nihai_onay | muhasebe ([UserHomeRouter]).
   String get _listFilterMode {
     final r =
         widget.userRole?.trim().toLowerCase().replaceAll(RegExp(r'\s+'), '_') ?? '';
-    if (r == 'ara_onay') return 'ara_onay';
+    if (r == 'ara_onay' || r == 'ikinci_ara_onay') return 'ara_onay';
     if (r == 'nihai_onay') return 'nihai_onay';
     if (r == 'muhasebe') return 'muhasebe';
     if (r == 'admin') return 'admin';
     return 'admin';
+  }
+
+  bool get _isIkinciAraOnay {
+    final r =
+        widget.userRole?.trim().toLowerCase().replaceAll(RegExp(r'\s+'), '_') ?? '';
+    return r == 'ikinci_ara_onay';
   }
 
   /// Ara / nihai / muhasebe: sadeleştirilmiş arayüz, portala bağlanmadan Firestore listesi.
@@ -303,6 +316,18 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
   }
 
   /// Fatura belgesi: önce `supplierVkn`, yoksa `qnbRaw.gondericiVkn`.
+  static String _normBirim(String raw) {
+    var s = raw.trim().replaceAll('İ', 'i').replaceAll('I', 'ı');
+    s = s.toLowerCase();
+    return s
+        .replaceAll('ı', 'i')
+        .replaceAll('ş', 's')
+        .replaceAll('ğ', 'g')
+        .replaceAll('ü', 'u')
+        .replaceAll('ö', 'o')
+        .replaceAll('ç', 'c');
+  }
+
   static String? _invoiceSupplierVknDigits(Map<String, dynamic> data) {
     final top = _digitsOnlyVkn(data['supplierVkn']?.toString());
     if (top.isNotEmpty) return top;
@@ -386,11 +411,16 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     final col = FirebaseFirestore.instance.collection('qnb_invoices');
     final mode = _listFilterMode;
     final profileBirim = widget.profileBirim?.trim() ?? '';
+    final birimNorm = _normBirim(profileBirim);
     final myUid = FirebaseAuth.instance.currentUser?.uid ?? '';
     final araOnaySupplierVkns = (mode == 'ara_onay' && profileBirim.isNotEmpty)
         ? await _fetchSupplierVknsForBirim(profileBirim)
         : null;
-
+    final yalnizKendiNihai = birimNorm == 'sinan';
+    final portalVknBirim = yalnizKendiNihai || birimNorm == 'yasin';
+    final portalVkns = (mode == 'nihai_onay' && portalVknBirim && profileBirim.isNotEmpty)
+        ? await _fetchSupplierVknsForBirim(profileBirim)
+        : null;
     if (mode == 'muhasebe' && _muhasebeFiltre == _MuhasebeFiltre.onayBekliyor) {
       final araDocs = await _paginateByDocId(
         () => col.orderBy(FieldPath.documentId),
@@ -437,11 +467,17 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
       final snap = await col.where('arsivDurumu', isEqualTo: 'arsiv_bekliyor').get();
       docs = snap.docs;
     } else if (mode == 'nihai_onay') {
-      docs = await _paginateByDocId(
-        () => col
-            .where('onayDurumu', isEqualTo: _nihaiOnayDurumuValue)
-            .orderBy(FieldPath.documentId),
-      );
+      if (portalVkns != null && portalVkns.isNotEmpty) {
+        docs = await _paginateByDocId(
+          () => col.orderBy(FieldPath.documentId),
+        );
+      } else {
+        docs = await _paginateByDocId(
+          () => col
+              .where('onayDurumu', isEqualTo: _nihaiOnayDurumuValue)
+              .orderBy(FieldPath.documentId),
+        );
+      }
     } else if (mode == 'muhasebe') {
       final durum = _muhasebeFiltre == _MuhasebeFiltre.reddedildi
           ? _reddedildiDurumuValue
@@ -474,7 +510,23 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
           }
         }
       } else if (mode == 'nihai_onay') {
-        if (!_onayDurumuIsNihaiPool(data['onayDurumu'])) continue;
+        final hedefUid = (data['nihaiOnayAtananUid']?.toString() ?? '').trim();
+        if (_onayDurumuIsNihaiPool(data['onayDurumu'])) {
+          if (yalnizKendiNihai) {
+            if (hedefUid != myUid) continue;
+          } else if (hedefUid.isNotEmpty && hedefUid != myUid) {
+            continue;
+          }
+        } else if (portalVkns != null &&
+            portalVkns.isNotEmpty &&
+            onay.isEmpty) {
+          final assigned = (data['araOnayAtananUid']?.toString() ?? '').trim();
+          if (assigned.isNotEmpty) continue;
+          final vkn = _invoiceSupplierVknDigits(data);
+          if (vkn == null || !portalVkns.contains(vkn)) continue;
+        } else {
+          continue;
+        }
       } else if (mode == 'muhasebe') {
         if (_muhasebeFiltre == _MuhasebeFiltre.reddedildi) {
           if (!_onayDurumuIsReddedildi(data['onayDurumu'])) continue;
@@ -504,6 +556,11 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     _fromController = TextEditingController(text: _fmtYmd(from));
     _toController = TextEditingController(text: _fmtYmd(now));
     WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+    // Yönlendirme diyaloğunun hedef listesi: fonksiyonun soğuk başlatması burada,
+    // arka planda ödenir. Yalnızca "Yönlendir" düğmesini gören rol (ara_onay) için.
+    if (_listFilterMode == 'ara_onay' && !_isIkinciAraOnay) {
+      widget.api.prefetchAraOnayUsers();
+    }
   }
 
   @override
@@ -1578,7 +1635,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
                                       ),
                                       isThreeLine: false,
                                       onTap: () => _openInvoicePdfReview(it),
-                                      trailing: isAraOnay
+                                      trailing: isAraOnay && !_isIkinciAraOnay
                                           ? Row(
                                               mainAxisSize: MainAxisSize.min,
                                               children: [

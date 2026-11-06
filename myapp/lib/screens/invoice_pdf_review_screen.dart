@@ -54,11 +54,11 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
   final TextEditingController _noteCtrl = TextEditingController();
   bool _saving = false;
 
-  /// `ara_onay` / `nihai_onay` / `muhasebe`: sade görünüm (TabBarView); muhasebede alt çubukta not/onay/red yok.
+  /// `ara_onay` / `ikinci_ara_onay` / `nihai_onay` / `muhasebe`: sade görünüm (TabBarView); muhasebede alt çubukta not/onay/red yok.
   bool get _isMinimalApproverUi {
     final r =
         widget.userRole?.trim().toLowerCase().replaceAll(RegExp(r'\s+'), '_') ?? '';
-    return r == 'ara_onay' || r == 'nihai_onay' || r == 'muhasebe';
+    return r == 'ara_onay' || r == 'ikinci_ara_onay' || r == 'nihai_onay' || r == 'muhasebe';
   }
 
   /// Muhasebe: yalnızca önizleme; açıklama alanı ve Onayla/Reddet gösterilmez.
@@ -68,11 +68,11 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
     return r == 'muhasebe';
   }
 
-  /// Ara onay: birincil düğme "Onaya Sun" ve `onaya_sunuldu`.
+  /// Ara onay ve Erdem (`ikinci_ara_onay`): birincil düğme "Onaya Sun" ve `onaya_sunuldu`.
   bool get _isAraOnay {
     final r =
         widget.userRole?.trim().toLowerCase().replaceAll(RegExp(r'\s+'), '_') ?? '';
-    return r == 'ara_onay';
+    return r == 'ara_onay' || r == 'ikinci_ara_onay';
   }
 
   String _normalizedUserRole() =>
@@ -81,6 +81,7 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
   /// Cloud Function notunu hangi Firestore açıklama alanına yazacağını belirtir.
   String? _aciklamaRoleForApi() {
     final r = _normalizedUserRole();
+    if (r == 'ikinci_ara_onay') return 'ara_onay';
     if (r == 'ara_onay' || r == 'nihai_onay' || r == 'muhasebe' || r == 'admin') return r;
     return null;
   }
@@ -143,7 +144,7 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
   }
 
   List<Widget> _araOnayBarActions(BuildContext context) {
-    if (!_isAraOnay) return const [];
+    if (_normalizedUserRole() != 'ara_onay') return const [];
     return [
       IconButton(
         tooltip: 'Yönlendir',
@@ -161,14 +162,17 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
     if (_saving) return;
     setState(() => _saving = true);
     try {
-      await widget.api.updateQnbInvoiceYonetimOnay(
+      final res = await widget.api.updateQnbInvoiceYonetimOnay(
         docId: _invoiceDocId,
         decision: decision,
         note: _noteCtrl.text,
         aciklamaRole: _aciklamaRoleForApi(),
       );
       if (!mounted) return;
+      final routed = (res['routedToBirim']?.toString() ?? '').trim();
       final msg = switch (decision) {
+        'onaya_sunuldu' when routed == 'erdem' => 'Fatura Erdem onayına gönderildi.',
+        'onaya_sunuldu' when routed == 'sinan' => 'Fatura Sinan onayına gönderildi.',
         'onaya_sunuldu' => 'Fatura onaya sunuldu olarak kaydedildi.',
         'onaylandı' => 'Fatura onaylandı olarak kaydedildi.',
         _ => 'Fatura reddedildi olarak kaydedildi.',

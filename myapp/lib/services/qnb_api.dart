@@ -129,7 +129,8 @@ class QnbApi {
   }
 
   /// [aciklamaRole] `ara_onay` / `nihai_onay` / `muhasebe` → ilgili `onayAciklama*`; `admin`/null → `onayAciklama`.
-  Future<void> updateQnbInvoiceYonetimOnay({
+  /// Dönüş: `onayDurumu` ve varsa `routedToBirim` (`erdem` | `sinan`).
+  Future<Map<String, dynamic>> updateQnbInvoiceYonetimOnay({
     required String docId,
     required String decision,
     String? note,
@@ -155,9 +156,15 @@ class QnbApi {
     if (r.statusCode >= 400) {
       throw Exception('UPDATE_INVOICE_ONAY_FAILED ${r.statusCode}: ${r.body}');
     }
+    final decoded = jsonDecode(r.body);
+    if (decoded is Map) {
+      return decoded.map((k, v) => MapEntry(k.toString(), v));
+    }
+    return <String, dynamic>{};
   }
 
-  /// `user_profiles.role == ara_onay` olan kullanıcılar (yönlendirme hedefi).
+  /// Yönlendirme hedefi olabilecek kullanıcılar: `user_profiles.role` değeri
+  /// `ara_onay`, `ikinci_ara_onay` (Erdem) veya `nihai_onay` (Sinan, Yasin).
   Future<List<Map<String, dynamic>>> listAraOnayUsers() async {
     final token = await _idToken();
     final uri = Uri.parse(baseListAraOnayUsersUrl);
@@ -176,7 +183,35 @@ class QnbApi {
     return list.map((e) => (e as Map).cast<String, dynamic>()).toList();
   }
 
-  /// Bekleyen faturayı başka bir ara onay kullanıcısına atar (`qnb_invoices.araOnayAtananUid`).
+  /// [listAraOnayUsers] sonucu; oturum boyunca tutulur. Fonksiyonun soğuk başlatma
+  /// gecikmesi diyalog açılırken değil, liste ekranı açılırken ödenir ([prefetchAraOnayUsers]).
+  Future<List<Map<String, dynamic>>>? _araOnayUsersCache;
+
+  /// Yönlendirme hedeflerini önbellekten verir; yoksa yükler. Yükleme hata verirse
+  /// önbellek temizlenir ve bir sonraki çağrı yeniden dener.
+  Future<List<Map<String, dynamic>>> listAraOnayUsersCached() {
+    return _araOnayUsersCache ??= _loadAraOnayUsersForCache();
+  }
+
+  Future<List<Map<String, dynamic>>> _loadAraOnayUsersForCache() async {
+    try {
+      return await listAraOnayUsers();
+    } catch (_) {
+      _araOnayUsersCache = null;
+      rethrow;
+    }
+  }
+
+  /// Hedef listesini arka planda ısıtır. Yalnızca `ara_onay` rolü çağırmalı
+  /// (fonksiyon diğer rollere 403 döner). Hata sessizce yutulur; diyalog açılınca
+  /// [listAraOnayUsersCached] yeniden dener ve hatayı kullanıcıya gösterir.
+  void prefetchAraOnayUsers() {
+    unawaited(listAraOnayUsersCached().then<void>((_) {}, onError: (Object _) {}));
+  }
+
+  /// Bekleyen faturayı başka bir onay kullanıcısına yönlendirir. Ara/Erdem hedefte
+  /// `qnb_invoices.araOnayAtananUid`; nihai hedefte `onayDurumu = onaya sunuldu` +
+  /// `nihaiOnayAtananUid` yazılır (sunucu tarafı karar verir).
   Future<void> assignQnbInvoiceAraOnay({
     required String docId,
     required String targetUid,

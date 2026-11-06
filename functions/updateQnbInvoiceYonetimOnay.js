@@ -31,17 +31,77 @@ async function yazarGorunenAd(uid) {
   return uid;
 }
 
+/** Onaya sunan kişinin ekranda görünen birimi. Sonraki onay bu alanı ezmez. */
+function onayaSunanKaydi(uid, callerData) {
+  const birim = String(callerData?.birim || "").trim();
+  /** @type {Record<string, unknown>} */
+  const out = { onayaSunanUid: uid };
+  if (birim) out.onayaSunanBirim = birim;
+  return out;
+}
+
 /** @param {string | undefined} raw */
 function normalizeProfileRole(raw) {
   if (raw == null) return "";
   return String(raw).trim().toLowerCase().replace(/\s+/g, "_");
 }
 
-/** @param {string} uid */
-async function getProfileRoleNormalized(uid) {
-  const p = await db.collection("user_profiles").doc(uid).get();
-  if (!p.exists) return "";
-  return normalizeProfileRole(p.data()?.role);
+/** Olcay, Eda, Yeliz, Elif, Ayşe onaya sununca fatura Erdem'e gider. Erdem onaya sununca Sinan'a. */
+const ILK_ARA_BIRIMLER = new Set(["olcay", "eda", "yeliz", "elif", "ayse"]);
+
+/** Dart liste süzmesi ile aynı: büyük İ ve Türkçe harfler. */
+export function normBirim(raw) {
+  let s = String(raw ?? "").trim().replaceAll("İ", "i").replaceAll("I", "ı");
+  s = s.toLowerCase();
+  return s
+    .replaceAll("ı", "i")
+    .replaceAll("ş", "s")
+    .replaceAll("ğ", "g")
+    .replaceAll("ü", "u")
+    .replaceAll("ö", "o")
+    .replaceAll("ç", "c");
+}
+
+/**
+ * `onaya_sunuldu` kararının gideceği birim.
+ * Boş dize: iplik, kumaş, giyim ve diğerleri — `onayDurumu` doğrudan `onaya sunuldu` olur.
+ * @param {string} birimNorm
+ * @returns {"erdem" | "sinan" | ""}
+ */
+export function onayaSunHedefBirim(birimNorm) {
+  if (ILK_ARA_BIRIMLER.has(birimNorm)) return "erdem";
+  if (birimNorm === "erdem") return "sinan";
+  return "";
+}
+
+/**
+ * @param {string} birimNorm
+ * @param {string} preferredRole
+ */
+async function findProfileUidByBirim(birimNorm, preferredRole) {
+  const snap = await db.collection("user_profiles").get();
+  /** @type {{ uid: string, role: string }[]} */
+  const matches = [];
+  for (const doc of snap.docs) {
+    const d = doc.data() || {};
+    if (normBirim(d.birim) !== birimNorm) continue;
+    matches.push({ uid: doc.id, role: normalizeProfileRole(d.role) });
+  }
+  if (matches.length === 0) {
+    const err = new Error(`Birimi ${birimNorm} olan kullanıcı bulunamadı`);
+    // @ts-ignore
+    err.status = 409;
+    throw err;
+  }
+  const preferred = matches.filter((m) => m.role === preferredRole);
+  const pool = preferred.length ? preferred : matches;
+  if (pool.length !== 1) {
+    const err = new Error(`Birimi ${birimNorm} olan birden fazla kullanıcı var`);
+    // @ts-ignore
+    err.status = 409;
+    throw err;
+  }
+  return pool[0].uid;
 }
 
 /** Ara/nihai onay (user_profiles) veya eski users.roles. */
@@ -49,7 +109,7 @@ async function requireInvoiceOnayPermission(uid) {
   const p = await db.collection("user_profiles").doc(uid).get();
   if (p.exists) {
     const r = normalizeProfileRole(p.data()?.role);
-    if (["admin", "ara_onay", "nihai_onay", "muhasebe"].includes(r)) return;
+    if (["admin", "ara_onay", "ikinci_ara_onay", "nihai_onay", "muhasebe"].includes(r)) return;
   }
   await requireRole(uid, ROLES_QNB_MUTATE);
 }
@@ -65,7 +125,11 @@ const setCors = (req, res) => {
  * POST JSON: { docId, decision, note?, aciklamaRole?: "ara_onay" | "nihai_onay" | "muhasebe" | "admin" }
  * Açıklama: ara / nihai / muhasebe ayrı alanlar; admin → onayAciklama
  * Firestore onayDurumu: onaylandı | reddedildi | onaya sunuldu
- * Red (ara/nihai): `reddedenRol` (`ara_onay` | `nihai_onay`), `reddedenUid`
+ * Birimi olcay, eda, yeliz, elif, ayse olan ara onay `onaya_sunuldu` yazmaz;
+ * faturayı birimi erdem olan kullanıcıya atar (`araOnayAtananUid`).
+ * Birimi erdem olan kullanıcı `onaya_sunuldu` ile faturayı birimi sinan olan nihai onaya yazar
+ * (`nihaiOnayAtananUid`). İplik, kumaş ve giyim bu ayrımı kullanmaz.
+ * Red (ara/nihai): `reddedenRol` (`ara_onay` | `ikinci_ara_onay` | `nihai_onay`), `reddedenUid`
  */
 export const updateQnbInvoiceYonetimOnay = onRequest({ region: "europe-west1" }, async (req, res) => {
   try {
@@ -110,23 +174,26 @@ export const updateQnbInvoiceYonetimOnay = onRequest({ region: "europe-west1" },
       return res.status(400).json({ error: "Document is not type=invoice" });
     }
 
+    const callerProf = await db.collection("user_profiles").doc(user.uid).get();
+    const callerData = callerProf.exists ? callerProf.data() || {} : {};
+    const callerBirim = normBirim(callerData.birim);
+    const hedefBirim = decision === "onaya_sunuldu" ? onayaSunHedefBirim(callerBirim) : "";
+    const noteRole = aciklamaRole === "ikinci_ara_onay" ? "ara_onay" : aciklamaRole;
+
     /** @type {Record<string, unknown>} */
     const patch = {
-      onayDurumu,
-      onayTarihi: FieldValue.serverTimestamp(),
-      onaylayanUid: user.uid,
       updatedAt: FieldValue.serverTimestamp(),
     };
 
     if (noteRaw) {
       const yazarAd = await yazarGorunenAd(user.uid);
-      if (aciklamaRole === "ara_onay") {
+      if (noteRole === "ara_onay") {
         patch.onayAciklamaAraOnay = noteRaw;
         patch.onayAciklamaAraOnayYazanAd = yazarAd;
-      } else if (aciklamaRole === "nihai_onay") {
+      } else if (noteRole === "nihai_onay") {
         patch.onayAciklamaNihaiOnay = noteRaw;
         patch.onayAciklamaNihaiOnayYazanAd = yazarAd;
-      } else if (aciklamaRole === "muhasebe") {
+      } else if (noteRole === "muhasebe") {
         patch.onayAciklamaMuhasebe = noteRaw;
         patch.onayAciklamaMuhasebeYazanAd = yazarAd;
       } else {
@@ -135,9 +202,43 @@ export const updateQnbInvoiceYonetimOnay = onRequest({ region: "europe-west1" },
       }
     }
 
+    if (hedefBirim === "erdem" || hedefBirim === "sinan") {
+      const mevcutOnay = String(data.onayDurumu || "").trim();
+      if (mevcutOnay) {
+        return res.status(409).json({ error: "Bu fatura ara onay kuyruğunda değil" });
+      }
+      if (hedefBirim === "erdem") {
+        const erdemUid = await findProfileUidByBirim("erdem", "ikinci_ara_onay");
+        patch.araOnayAtananUid = erdemUid;
+        patch.araOnayYonlendirenUid = user.uid;
+        patch.araOnayYonlendirildiAt = FieldValue.serverTimestamp();
+      } else {
+        const sinanUid = await findProfileUidByBirim("sinan", "nihai_onay");
+        patch.onayDurumu = "onaya sunuldu";
+        patch.onayTarihi = FieldValue.serverTimestamp();
+        patch.onaylayanUid = user.uid;
+        patch.nihaiOnayAtananUid = sinanUid;
+      }
+      Object.assign(patch, onayaSunanKaydi(user.uid, callerData));
+      await ref.set(patch, { merge: true });
+      return res.status(200).json({
+        success: true,
+        docId,
+        onayDurumu: hedefBirim === "sinan" ? "onaya sunuldu" : mevcutOnay,
+        routedToBirim: hedefBirim,
+      });
+    }
+
+    patch.onayDurumu = onayDurumu;
+    patch.onayTarihi = FieldValue.serverTimestamp();
+    patch.onaylayanUid = user.uid;
+    if (decision === "onaya_sunuldu") {
+      Object.assign(patch, onayaSunanKaydi(user.uid, callerData));
+    }
+
     if (onayDurumu === "reddedildi") {
-      const profRol = await getProfileRoleNormalized(user.uid);
-      if (profRol === "ara_onay" || profRol === "nihai_onay") {
+      const profRol = normalizeProfileRole(callerData.role);
+      if (profRol === "ara_onay" || profRol === "ikinci_ara_onay" || profRol === "nihai_onay") {
         patch.reddedenRol = profRol;
         patch.reddedenUid = user.uid;
       }

@@ -14,7 +14,9 @@ String invoiceDocIdFromItem(Map<String, dynamic> item) {
   return 'invoice_${_safeDocKey(belgeNo)}';
 }
 
-/// Ara onay: bekleyen faturayı başka bir ara onay kullanıcısına yönlendir.
+/// Ara onay: bekleyen faturayı başka bir onay kullanıcısına yönlendir
+/// (ara onay, Erdem veya nihai onay — Sinan / Yasin). Nihai hedefte fatura
+/// `onaya sunuldu` olur ve hedefin nihai kuyruğuna düşer.
 /// Başarılıysa `true` döner (çağıran liste yenilemek için kullanabilir).
 Future<bool> showAraOnayYonlendirDialog(
   BuildContext context, {
@@ -71,7 +73,7 @@ class _AraOnayYonlendirDialogState extends State<_AraOnayYonlendirDialog> {
   @override
   void initState() {
     super.initState();
-    _usersFuture = widget.api.listAraOnayUsers();
+    _usersFuture = widget.api.listAraOnayUsersCached();
   }
 
   Future<void> _submit() async {
@@ -128,7 +130,7 @@ class _AraOnayYonlendirDialogState extends State<_AraOnayYonlendirDialog> {
                 })
                 .toList();
             if (rows.isEmpty) {
-              return const Text('Yönlendirilebilecek başka ara onay kullanıcısı yok.');
+              return const Text('Yönlendirilebilecek başka kullanıcı yok.');
             }
             return DropdownButtonFormField<String>(
               decoration: const InputDecoration(

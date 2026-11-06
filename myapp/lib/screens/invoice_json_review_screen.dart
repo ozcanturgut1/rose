@@ -2331,6 +2331,29 @@ String _kullaniciEtiketiOnay(String? raw) {
   return local.isNotEmpty ? local : s;
 }
 
+/// Onaya sunan kişi: kayıtlı birim, yoksa `onaya sunuldu` iken `onaylayanUid` profili.
+Future<String> _onayaSunanMetni(Map<String, dynamic> inv) async {
+  final kayitli = inv['onayaSunanBirim']?.toString().trim() ?? '';
+  if (kayitli.isNotEmpty) return kayitli;
+
+  final durum = inv['onayDurumu']?.toString().trim() ?? '';
+  var uid = inv['onayaSunanUid']?.toString().trim() ?? '';
+  if (uid.isEmpty && durum == 'onaya sunuldu') {
+    uid = inv['onaylayanUid']?.toString().trim() ?? '';
+  }
+  if (uid.isEmpty && durum.isEmpty) {
+    uid = inv['araOnayYonlendirenUid']?.toString().trim() ?? '';
+  }
+  if (uid.isEmpty) return '';
+  try {
+    final snap =
+        await FirebaseFirestore.instance.collection('user_profiles').doc(uid).get();
+    return snap.data()?['birim']?.toString().trim() ?? '';
+  } catch (_) {
+    return '';
+  }
+}
+
 /// [InvoicePdfReviewScreen._allOnayAciklamalarDisplayText] ile aynı mantık.
 String _onayAciklamalarDisplayFromMap(Map<String, dynamic> m) {
   final parts = <String>[];
@@ -2385,11 +2408,11 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
     return r == 'muhasebe';
   }
 
-  /// Ara onay: birincil düğme "Onaya Sun" ve `onaya_sunuldu`.
+  /// Ara onay ve Erdem (`ikinci_ara_onay`): birincil düğme "Onaya Sun" ve `onaya_sunuldu`.
   bool get _isAraOnay {
     final r =
         widget.userRole?.trim().toLowerCase().replaceAll(RegExp(r'\s+'), '_') ?? '';
-    return r == 'ara_onay';
+    return r == 'ara_onay' || r == 'ikinci_ara_onay';
   }
 
   String _normalizedUserRole() =>
@@ -2397,6 +2420,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
 
   String? _aciklamaRoleForApi() {
     final r = _normalizedUserRole();
+    if (r == 'ikinci_ara_onay') return 'ara_onay';
     if (r == 'ara_onay' || r == 'nihai_onay' || r == 'muhasebe' || r == 'admin') return r;
     return null;
   }
@@ -2439,14 +2463,17 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
         }
       }
 
-      await widget.api.updateQnbInvoiceYonetimOnay(
+      final res = await widget.api.updateQnbInvoiceYonetimOnay(
         docId: _invoiceDocId,
         decision: decision,
         note: _noteCtrl.text,
         aciklamaRole: _aciklamaRoleForApi(),
       );
       if (!mounted) return;
+      final routed = (res['routedToBirim']?.toString() ?? '').trim();
       final msg = switch (decision) {
+        'onaya_sunuldu' when routed == 'erdem' => 'Fatura Erdem onayına gönderildi.',
+        'onaya_sunuldu' when routed == 'sinan' => 'Fatura Sinan onayına gönderildi.',
         'onaya_sunuldu' => 'Fatura onaya sunuldu olarak kaydedildi.',
         'onaylandı' => 'Fatura onaylandı olarak kaydedildi.',
         _ => 'Fatura reddedildi olarak kaydedildi.',
@@ -2554,6 +2581,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
     final onayAcikText = _onayAciklamalarDisplayFromMap(mergedOnay);
     final ettnStr = mergedOnay['ettn']?.toString().trim();
     final onayDurumuStr = mergedOnay['onayDurumu']?.toString().trim();
+    final onayaSunan = await _onayaSunanMetni(mergedOnay);
 
     final baslik = _faturaBaslikAlanlari(invData);
     final faturaOzeti = <String, dynamic>{
@@ -2583,6 +2611,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
       else if (ettnStr != null && ettnStr.isNotEmpty)
         'ettn': ettnStr,
       if (onayDurumuStr != null && onayDurumuStr.isNotEmpty) 'onayDurumu': onayDurumuStr,
+      if (onayaSunan.isNotEmpty) 'onayaSunan': onayaSunan,
     };
 
     final irsaliyeler = <Map<String, dynamic>>[];
@@ -2646,7 +2675,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
                 );
               },
             ),
-          if (_isAraOnay)
+          if (_normalizedUserRole() == 'ara_onay')
             IconButton(
               tooltip: 'Yönlendir',
               icon: const Icon(Icons.person_search_outlined),
@@ -3042,6 +3071,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
     final cs = Theme.of(context).colorScheme;
     final acik = _fmt(f['onayAciklamalarText']);
     final durum = f['onayDurumu']?.toString().trim();
+    final sunan = f['onayaSunan']?.toString().trim();
     final ettn = f['ettn']?.toString().trim();
 
     return Column(
@@ -3059,6 +3089,13 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
           const SizedBox(height: 6),
           Text(
             'Onay durumu: $durum',
+            style: const TextStyle(fontSize: 13),
+          ),
+        ],
+        if (sunan != null && sunan.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Text(
+            'Onaya sunan: $sunan',
             style: const TextStyle(fontSize: 13),
           ),
         ],

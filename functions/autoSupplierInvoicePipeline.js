@@ -4,7 +4,7 @@
  * Her 30 dakikada bir tetiklenir ve son_10_fatura_screen'deki 4 buton ak\u0131\u015f\u0131n\u0131 ayn\u0131 s\u0131rayla
  * otomatik olarak \u00e7al\u0131\u015ft\u0131r\u0131r:
  *
- *  1) suppliers/iplik + suppliers/kumas dok\u00fcmanlar\u0131ndaki VKN'lere ait, tetiklendi\u011fi g\u00fcn
+ *  1) suppliers koleksiyonundaki bütün VKN'lere ait, tetiklendiği gün
  *     portala d\u00fc\u015fen faturalar qnb_invoices'a yaz\u0131l\u0131r ve UBL ile zenginle\u015ftirilir.
  *  2) qnb_docs irsaliye \u00f6nbelle\u011fi portala g\u00f6re g\u00fcncellenir (cursor tabanl\u0131 sayfalama,
  *     qnb_sync_state/app.despatchNextStart ile devam eder).
@@ -162,7 +162,7 @@ function deadlineExceeded(startedAtMs, budgetMs) {
 }
 
 // ---------------------------------------------------------------------------
-// suppliers/{iplik|kumas} VKN k\u00fcmesi
+// suppliers koleksiyonundaki bütün VKN'ler
 // ---------------------------------------------------------------------------
 
 function consumeVknValue(raw, out) {
@@ -189,13 +189,9 @@ function consumeVknValue(raw, out) {
 
 async function loadAllowedSupplierVkns() {
   const out = new Set();
-  for (const docId of ["iplik", "kumas"]) {
-    const snap = await db.collection("suppliers").doc(docId).get();
-    if (!snap.exists) {
-      logger.warn(`autoPipeline: suppliers/${docId} bulunamad\u0131`);
-      continue;
-    }
-    const d = snap.data() || {};
+  const snap = await db.collection("suppliers").get();
+  for (const doc of snap.docs) {
+    const d = doc.data() || {};
     consumeVknValue(d.vkns, out);
     consumeVknValue(d.vkn, out);
     consumeVknValue(d.vknList, out);
@@ -409,7 +405,7 @@ async function runStep1IngestSupplierInvoices(startedAtMs) {
   if (allowed.size === 0) {
     return {
       skipped: true,
-      reason: "suppliers/iplik+kumas i\u00e7inde VKN bulunamad\u0131",
+      reason: "suppliers içinde VKN bulunamadı",
     };
   }
   const { from, to } = rollingWindow(ROLLING_WINDOW_DAYS);
@@ -969,6 +965,88 @@ async function acquireRunLock(now) {
     );
     return { acquired: true };
   });
+}
+
+function portalItemKey(it) {
+  return (
+    invoiceDocIdForKey(it) ||
+    (it?.ettn || it?.ETTN ? `ettn_${it.ettn || it.ETTN}` : null)
+  );
+}
+
+function addDaysYmd(ymd, days) {
+  const [y, m, d] = String(ymd).split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getUTCDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
+
+/**
+ * Tek günün portala gelişlerini yazar. QNB tek gün sorgusu 0 döndürdüğü için
+ * [gün, ertesi] listesinden [ertesi, +1] listesi çıkarılır; kalanlar o güne aittir.
+ * Zamanlanmış turun penceresini ve kilit kaydını değiştirmez.
+ */
+export async function ingestSupplierInvoicesForArrivalDay(ymd) {
+  const vknTckn = process.env.QNB_VKN_TCKN;
+  if (!vknTckn) throw new Error("QNB_VKN_TCKN missing in env");
+  const allowed = await loadAllowedSupplierVkns();
+  const nextYmd = addDaysYmd(ymd, 1);
+  const dayList = await listInvoicesForGelisRangeTwoDay(vknTckn, ymd, ymd);
+  const nextList = await listInvoicesForGelisRangeTwoDay(vknTckn, nextYmd, nextYmd);
+  const nextKeys = new Set(nextList.items.map(portalItemKey).filter(Boolean));
+  const arrivedThatDay = dayList.items.filter((it) => {
+    const key = portalItemKey(it);
+    return key && !nextKeys.has(key);
+  });
+  const filtered = arrivedThatDay.filter((it) => {
+    const v = gondericiVknFromItem(it);
+    return v != null && allowed.has(v);
+  });
+
+  const upsertedDocIds = [];
+  let skippedArchived = 0;
+  const upsertErrors = [];
+  for (const it of filtered) {
+    try {
+      const r = await upsertInvoiceDoc(it);
+      if (!r) continue;
+      if (r.skipped === "archived") {
+        skippedArchived++;
+        continue;
+      }
+      upsertedDocIds.push(r.docId);
+    } catch (e) {
+      upsertErrors.push(String(e?.message || e).slice(0, 200));
+    }
+  }
+
+  let enriched = 0;
+  for (const id of upsertedDocIds) {
+    try {
+      const ok = await enrichOne(id);
+      if (ok) enriched++;
+    } catch (e) {
+      logger.warn("arrival-day enrichOne failed", {
+        id,
+        err: String(e?.message || e).slice(0, 200),
+      });
+    }
+  }
+
+  return {
+    ymd,
+    allowedVknCount: allowed.size,
+    listedInWindow: dayList.items.length,
+    arrivedThatDay: arrivedThatDay.length,
+    matchedBySupplier: filtered.length,
+    skippedAlreadyArchived: skippedArchived,
+    upsertedDocIds,
+    enriched,
+    upsertErrors,
+  };
 }
 
 async function releaseRunLock(extra) {

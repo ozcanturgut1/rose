@@ -8,7 +8,7 @@ import 'son_10_fatura_screen.dart';
 /// Firestore `user_profiles/{uid}` → `role` zorunlu; tanımsız / boş / desteklenmeyen rol → erişim yok.
 ///
 /// - **admin** → portal + tarih + Sorgula + tüm araçlar
-/// - **ara_onay** / **nihai_onay** → yalnızca Firestore listesi (tarih/sorgu yok; tüm uygun faturalar)
+/// - **ara_onay** / **ikinci_ara_onay** / **nihai_onay** → yalnızca Firestore listesi (tarih/sorgu yok; tüm uygun faturalar)
 /// - **muhasebe** → yalnızca `onayDurumu == onaylandı` faturalar (Firestore, tarih/sorgu yok)
 /// - **depo** → son 10 portal faturası listesi (salt okuma API ile aynı ekran)
 class UserHomeRouter extends StatelessWidget {
@@ -27,6 +27,7 @@ class UserHomeRouter extends StatelessWidget {
   static bool _isAllowedRole(String? normalized) {
     return normalized == 'admin' ||
         normalized == 'ara_onay' ||
+        normalized == 'ikinci_ara_onay' ||
         normalized == 'nihai_onay' ||
         normalized == 'muhasebe' ||
         normalized == 'depo';
@@ -74,7 +75,7 @@ class UserHomeRouter extends StatelessWidget {
         if (!_isAllowedRole(normalized)) {
           return _BlockedAccessScreen(
             message:
-                'Desteklenmeyen rol: ${roleRaw ?? normalized}\n\nYalnızca admin, ara_onay, nihai_onay, muhasebe veya depo kullanılabilir.',
+                'Desteklenmeyen rol: ${roleRaw ?? normalized}\n\nYalnızca admin, ara_onay, ikinci_ara_onay, nihai_onay, muhasebe veya depo kullanılabilir.',
           );
         }
 
@@ -87,6 +88,7 @@ class UserHomeRouter extends StatelessWidget {
             );
           case 'admin':
           case 'ara_onay':
+          case 'ikinci_ara_onay':
           case 'nihai_onay':
           case 'muhasebe':
             return Son10FaturaScreen(

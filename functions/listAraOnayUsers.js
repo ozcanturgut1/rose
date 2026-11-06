@@ -19,6 +19,12 @@ function normalizeProfileRole(raw) {
   return String(raw).trim().toLowerCase().replace(/\s+/g, "_");
 }
 
+/**
+ * Manuel yönlendirme hedefi olabilen roller: ara onay, Erdem (`ikinci_ara_onay`)
+ * ve nihai onay (Sinan, Yasin). `assignQnbInvoiceAraOnay` aynı kümeyi doğrular.
+ */
+export const YONLENDIRME_HEDEF_ROLLER = new Set(["ara_onay", "ikinci_ara_onay", "nihai_onay"]);
+
 /** @param {string} uid */
 async function requireAraOnayProfile(uid) {
   const p = await db.collection("user_profiles").doc(uid).get();
@@ -38,7 +44,8 @@ async function requireAraOnayProfile(uid) {
 }
 
 /**
- * Yönlendirme hedefi seçimi: `user_profiles` içinde `role === ara_onay` olanlar (`birim` dahil).
+ * Yönlendirme hedefi seçimi: `user_profiles` içinde rolü [YONLENDIRME_HEDEF_ROLLER]
+ * kümesinde olanlar (`birim` dahil). Yalnızca ara onay kullanıcısı listeleyebilir.
  * GET — Authorization: Bearer idToken
  */
 export const listAraOnayUsers = onRequest({ region: "europe-west1" }, async (req, res) => {
@@ -55,7 +62,7 @@ export const listAraOnayUsers = onRequest({ region: "europe-west1" }, async (req
     const out = [];
     for (const doc of snap.docs) {
       const d = doc.data() || {};
-      if (normalizeProfileRole(d.role) !== "ara_onay") continue;
+      if (!YONLENDIRME_HEDEF_ROLLER.has(normalizeProfileRole(d.role))) continue;
       const uid = doc.id;
       const label =
         String(d.displayName || d.name || d.fullName || d.email || "").trim();

@@ -626,7 +626,11 @@ function classifyInvoiceType(data) {
   const inv = firstOf(up.Invoice);
   const ublInvoiceTypeCode = textNode(inv?.InvoiceTypeCode).trim();
   const invType = upper(q.faturaTipi || q.invoiceTypeCode || data.invoiceTypeCode || ublInvoiceTypeCode || "");
-  const hasTevkifat = parseNum(q.tevkifatTutari ?? data.tevkifatTutari, 0) > 0 || invType.includes("TEVK");
+  const ublTevkifatTutar = parseNum(extractWithholdingFromUbl(data).tevkifatTutar, 0);
+  const hasTevkifat =
+    parseNum(q.tevkifatTutari ?? data.tevkifatTutari, 0) > 0 ||
+    invType.includes("TEVK") ||
+    ublTevkifatTutar > 0;
   const isIade = invType.includes("IADE") || invType.includes("RETURN") || invType.includes("CREDIT");
   const isIstisna = invType.includes("ISTISNA") || invType.includes("EXEMPT");
   return { invType, hasTevkifat, isIade, isIstisna };
@@ -648,6 +652,18 @@ async function resolveErpFaturaTipNo(pool, cls) {
     .request()
     .query("SELECT TOP 1 FATFTNO FROM dbo.FATFISTIP WITH (NOLOCK) WHERE UPPER(FATFTKOD)='ALIM' ORDER BY FATFTNO");
   return r.recordset.length ? r.recordset[0].FATFTNO : 1;
+}
+
+/** Gelen tevkifat faturası. Geçmişteki yanlış gider fişleri bu tipi oylayamaz. */
+async function resolveTevkifatAlisTipNo(pool) {
+  const r = await pool.request().query(`
+    SELECT TOP 1 FATFTNO
+    FROM dbo.FATFISTIP WITH (NOLOCK)
+    WHERE FATFTKOD LIKE N'%TEVK%' AND FATFTKOD LIKE N'%ALI%'
+    ORDER BY FATFTNO
+  `);
+  const n = Number(r.recordset[0]?.FATFTNO) || 0;
+  return n > 0 ? n : 8;
 }
 
 /**
@@ -1146,6 +1162,32 @@ function buildDocTotalsForAmountModel(afterData, q, usableLines) {
   return { mal, kdv, payable };
 }
 
+/**
+ * Tevkifatlı UBL'de TaxTotal kalan KDV olabilir.
+ * Toplam KDV = vergi dahil − matrah, ya da TaxTotal + tevkifat tutarı.
+ */
+function tevkifatToplamKdv(afterData, q, docTotals) {
+  const lmt = extractLegalMonetaryFromUbl(afterData);
+  const mal = Number(docTotals?.mal) || 0;
+  const ublTax = Number(docTotals?.kdv) || 0;
+  const withholding = parseNum(extractWithholdingFromUbl(afterData).tevkifatTutar, 0);
+  const qnbKdv = parseNum(q.kdvToplamTutari ?? afterData?.kdvToplamTutari, 0);
+  const payable = lmt?.payable > 0 ? lmt.payable : Number(docTotals?.payable) || 0;
+  const base = lmt?.taxExclusive > 0 ? lmt.taxExclusive : mal;
+  const fromInclusive =
+    lmt?.taxInclusive > 0 && base > 0 ? roundMoney(lmt.taxInclusive - base) : 0;
+  const netFromPayable = base > 0 && payable > base ? roundMoney(payable - base) : 0;
+  const taxIsNet =
+    withholding > 0 && netFromPayable > 0 && Math.abs(ublTax - netFromPayable) <= 0.05;
+  if (taxIsNet) {
+    if (fromInclusive > ublTax + 0.02) return fromInclusive;
+    if (qnbKdv > ublTax + 0.02) return qnbKdv;
+    return roundMoney(ublTax + withholding);
+  }
+  if (fromInclusive > 0) return fromInclusive;
+  return ublTax > 0 ? ublTax : qnbKdv;
+}
+
 function extractExchangeRateFromUbl(data) {
   const up = data.ublParsed && typeof data.ublParsed === "object" ? data.ublParsed : {};
   const inv = firstOf(up.Invoice);
@@ -1592,6 +1634,21 @@ async function resolveWriteStockCodeExact(wPool, code) {
     .input("stk", sql.NVarChar(40), c)
     .query("SELECT TOP 1 STKKOD FROM dbo.STKKART WITH (NOLOCK) WHERE STKKOD=@stk");
   return rs.recordset[0]?.STKKOD || null;
+}
+
+/** Ergül Kargo nakliyedir; taşıdığı malın cinsi stok kartını değiştirmez. */
+const ERGUL_KARGO_VKN = "3570025574";
+const ERGUL_NAKLİYE_STOK = "Z-NAKLİYE GİDERİ";
+
+async function resolveErgulKargoNakliyeStok(wPool, supplierVkn) {
+  const digits = String(supplierVkn || "").replace(/\D/g, "");
+  if (digits !== ERGUL_KARGO_VKN) return null;
+  const stkkod = await resolveWriteStockCodeExact(wPool, ERGUL_NAKLİYE_STOK);
+  if (!stkkod) {
+    console.warn("Ergül Kargo nakliye stok kartı bulunamadı:", ERGUL_NAKLİYE_STOK);
+    return null;
+  }
+  return { stkkod, source: "ergul_nakliye" };
 }
 
 /** Tedarikçi geçmişinden gelen STKKOD; kullanıcı aile öneki (A3 vb.) ile STKKART alternatifi. */
@@ -2187,6 +2244,8 @@ export async function previewStockLineMatches(afterData) {
       );
     }
   }
+  const ergulNakliyeStok = await resolveErgulKargoNakliyeStok(wPool, supplierVkn);
+  const zorunluStok = cekSenetStok || ergulNakliyeStok;
   const lineMatches = [];
 
   for (let i = 0; i < usableLines.length; i++) {
@@ -2198,10 +2257,10 @@ export async function previewStockLineMatches(afterData) {
     const historyMatch = preMatchedHistories[i] ?? null;
     let stokFamilyRemapFrom = null;
 
-    const histResolved = cekSenetStok
+    const histResolved = zorunluStok
       ? {
-          itemCodeResolved: cekSenetStok.stkkod,
-          matchSource: cekSenetStok.source,
+          itemCodeResolved: zorunluStok.stkkod,
+          matchSource: zorunluStok.source,
           stokFamilyRemapFrom: null,
         }
       : await resolveStockFromHistoryMatch(wPool, historyMatch, l, {
@@ -2210,7 +2269,7 @@ export async function previewStockLineMatches(afterData) {
         });
     itemCodeResolved = histResolved.itemCodeResolved;
     matchSource = histResolved.matchSource;
-    if (!cekSenetStok && historyMatch?.dominantFallback && matchSource) {
+    if (!zorunluStok && historyMatch?.dominantFallback && matchSource) {
       matchSource = "supplier_history_dominant";
     }
     stokFamilyRemapFrom = histResolved.stokFamilyRemapFrom;
@@ -2407,6 +2466,10 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
 
   if (amountModel === "ubl") {
     docTotals = buildDocTotalsForAmountModel(afterData, q, usableLines);
+    if (cls?.hasTevkifat) {
+      const grossKdv = tevkifatToplamKdv(afterData, q, docTotals);
+      if (grossKdv > docTotals.kdv + 0.02) docTotals = { ...docTotals, kdv: grossKdv };
+    }
     aligned = computeUblExactAmounts({
       usableLines,
       docTotals,
@@ -2447,7 +2510,13 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
       kdvOrani: usableLines[0]?.taxPercent ?? 0,
       tevkifatOrani,
     });
-    if (vergiTutari > 0) {
+    const grossKdv = tevkifatToplamKdv(afterData, q, {
+      mal: malHizmetToplamTutari,
+      kdv: vergiTutari,
+    });
+    if (grossKdv > 0) {
+      kdvSplit = { ...kdvSplit, toplamKdv: grossKdv };
+    } else if (vergiTutari > 0) {
       kdvSplit = { ...kdvSplit, toplamKdv: vergiTutari };
     }
     if (payableTl > 0) {
@@ -2514,10 +2583,14 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     cls,
     spSafeFatft
   );
-  const erpFaturaTipiNo =
+  let erpFaturaTipiNo =
     historicalFatTipPick > 0 && spSafeFatft.has(historicalFatTipPick)
       ? historicalFatTipPick
       : await resolveErpFaturaTipNo(rPool, cls);
+  if (cls?.hasTevkifat && !cls.isIade) {
+    const tevTip = await resolveTevkifatAlisTipNo(rPool);
+    if (!spSafeFatft.size || spSafeFatft.has(tevTip)) erpFaturaTipiNo = tevTip;
+  }
 
   const lineMatches = [];
   const lineCurrency = [];
@@ -2540,7 +2613,14 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     req.input("VadeTarihi", sql.DateTime, vadeTarihi);
     req.input("MalHizmetToplamTutari", sql.Decimal(18, 4), malHizmetToplamTutari);
     req.input("ToplamIskonto", sql.Decimal(18, 4), toplamIskonto);
-    req.input("VergiOrani", sql.Decimal(18, 4), usableLines[0]?.taxPercent || 0);
+    const lineKdvOrani = parseNum(usableLines[0]?.taxPercent, 0);
+    const vergiOraniKayit =
+      lineKdvOrani > 0
+        ? lineKdvOrani
+        : cls?.hasTevkifat && malHizmetToplamTutari > 0 && vergiTutariKayit > 0
+          ? roundMoney((vergiTutariKayit / malHizmetToplamTutari) * 100)
+          : 0;
+    req.input("VergiOrani", sql.Decimal(18, 4), vergiOraniKayit);
     req.input("VergiTutari", sql.Decimal(18, 4), vergiTutariKayit);
     req.input("OdenecekTutar", sql.Decimal(18, 4), odenecekTutarKayit);
     req.input("TevkifatOrani", sql.Decimal(18, 4), tevkifatOrani);
@@ -2613,6 +2693,9 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     }
   }
 
+  const ergulNakliyeStok = await resolveErgulKargoNakliyeStok(wPool, supplierVkn);
+  const zorunluStok = cekSenetStok || ergulNakliyeStok;
+
   for (let i = 0; i < usableLines.length; i++) {
     const l = usableLines[i];
     const alignedLine = aligned.perLine[i];
@@ -2640,10 +2723,10 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
       }
     }
     let stokFamilyRemapFrom = null;
-    const histResolved = cekSenetStok
+    const histResolved = zorunluStok
       ? {
-          itemCodeResolved: cekSenetStok.stkkod,
-          matchSource: cekSenetStok.source,
+          itemCodeResolved: zorunluStok.stkkod,
+          matchSource: zorunluStok.source,
           stokFamilyRemapFrom: null,
         }
       : await resolveStockFromHistoryMatch(wPool, historyMatch, l, {
@@ -2652,7 +2735,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
         });
     itemCodeResolved = histResolved.itemCodeResolved;
     matchSource = histResolved.matchSource;
-    if (!cekSenetStok && historyMatch?.dominantFallback && matchSource) {
+    if (!zorunluStok && historyMatch?.dominantFallback && matchSource) {
       matchSource = "supplier_history_dominant";
     }
     stokFamilyRemapFrom = histResolved.stokFamilyRemapFrom;
@@ -2886,6 +2969,30 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
       );
     }
   }
+  if (isForeignCurrency && !currencyTypeForPatch) {
+    try {
+      let cariDov = await cariDovizKarti(wPool, erpCariKodu);
+      if (!cariDov || cariDov.domestic) {
+        const okunan = await cariDovizKarti(rPool, erpCariKodu);
+        if (okunan) cariDov = okunan;
+      }
+      const faturaKod = String(paraBirimiRaw || "").trim().toUpperCase();
+      if (
+        cariDov &&
+        !cariDov.domestic &&
+        cariDov.tur &&
+        cariDov.kod === faturaKod
+      ) {
+        currencyTypeForPatch = cariDov.tur;
+      }
+    } catch (err) {
+      console.warn(
+        "syncApprovedInvoiceToEta: cari döviz türü okunamadı",
+        docId,
+        err?.message || err
+      );
+    }
+  }
   await patchCurrencyFields(wPool, fatFisRefNo, {
     currencyCode: currencyCodeForPatch,
     ...(currencyTypeForPatch ? { currencyType: currencyTypeForPatch } : {}),
@@ -2915,8 +3022,11 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   // ayrı binek prosedürü çağrılır. Ticari/araç dışı faturalar mevcut normal
   // muhasebe akışını (hiç değişmeden) kullanır.
   const aracTipi = String(afterData?.aracTespit?.aracTipi || "").trim().toLowerCase();
-  // ALIM (FATFISTIPI=1): muhasebe her zaman kalem bazlı; referans SP'ye gönderilmez.
-  const muhasebeRefForSp = Number(erpFaturaTipiNo) === 1 ? 0 : refFatFisForMuhasebe;
+  // ALIM kalem bazlıdır. Tevkifatlı alış da referans fişten kopyalanmaz;
+  // tutar ayrımı (indirilecek KDV / 360) belgeye göre kurulur.
+  const tevkifatAlis = Boolean(cls?.hasTevkifat) && !cls?.isIade;
+  const muhasebeRefForSp =
+    Number(erpFaturaTipiNo) === 1 || tevkifatAlis ? 0 : refFatFisForMuhasebe;
   let binekMuhasebe = null;
   if (aracTipi === "binek" && !cls?.hasTevkifat) {
     const rules = await loadAracGiderKurallari(getFirestore());

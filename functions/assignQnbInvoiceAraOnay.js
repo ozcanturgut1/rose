@@ -4,6 +4,7 @@ import { ensureAdmin } from "./adminInit.js";
 ensureAdmin();
 
 import { requireAuth } from "./requireAuth.js";
+import { YONLENDIRME_HEDEF_ROLLER } from "./listAraOnayUsers.js";
 
 const db = getFirestore();
 
@@ -19,7 +20,10 @@ function normalizeProfileRole(raw) {
   return String(raw).trim().toLowerCase().replace(/\s+/g, "_");
 }
 
-/** @param {string} uid */
+/**
+ * Çağıran ara onay olmalı; profil verisi (`birim` için) döner.
+ * @param {string} uid
+ */
 async function requireAraOnayProfile(uid) {
   const p = await db.collection("user_profiles").doc(uid).get();
   if (!p.exists) {
@@ -28,13 +32,15 @@ async function requireAraOnayProfile(uid) {
     err.status = 403;
     throw err;
   }
-  const r = normalizeProfileRole(p.data()?.role);
+  const data = p.data() || {};
+  const r = normalizeProfileRole(data.role);
   if (r !== "ara_onay") {
     const err = new Error("Yalnızca ara onay kullanıcıları yönlendirebilir");
     // @ts-ignore
     err.status = 403;
     throw err;
   }
+  return data;
 }
 
 /** @param {string} uid */
@@ -45,10 +51,14 @@ async function getProfileRoleNormalized(uid) {
 }
 
 /**
- * Ara onay kullanıcısı, bekleyen faturayı başka bir ara onay kullanıcısına atar.
+ * Ara onay kullanıcısı, bekleyen faturayı başka bir onay kullanıcısına yönlendirir.
  * POST JSON: { docId, targetUid }
- * - `qnb_invoices.araOnayAtananUid` = hedef uid. Atanmamışsa herhangi bir ara onay yönlendirebilir;
- *   başka birine atanmışsa yalnızca o kullanıcı yeniden yönlendirebilir.
+ * - Hedef rolü [YONLENDIRME_HEDEF_ROLLER] içinde olmalı (`listAraOnayUsers` ile aynı küme).
+ * - Hedef `ara_onay` / `ikinci_ara_onay` (Erdem): `araOnayAtananUid` = hedef uid; fatura ara kuyrukta kalır.
+ * - Hedef `nihai_onay` (Sinan, Yasin): `updateQnbInvoiceYonetimOnay` içindeki Erdem → Sinan yazımıyla aynı;
+ *   `onayDurumu` = `onaya sunuldu`, `nihaiOnayAtananUid` = hedef uid, `onayaSunanUid/Birim` = çağıran.
+ * - Atanmamışsa herhangi bir ara onay yönlendirebilir; başka birine atanmışsa yalnızca o kullanıcı
+ *   yeniden yönlendirebilir. `onayDurumu` dolu fatura yönlendirilemez.
  */
 export const assignQnbInvoiceAraOnay = onRequest({ region: "europe-west1" }, async (req, res) => {
   try {
@@ -57,7 +67,7 @@ export const assignQnbInvoiceAraOnay = onRequest({ region: "europe-west1" }, asy
     if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
     const user = await requireAuth(req);
-    await requireAraOnayProfile(user.uid);
+    const callerData = await requireAraOnayProfile(user.uid);
 
     const body = typeof req.body === "object" && req.body ? req.body : {};
     const docId = body.docId != null ? String(body.docId).trim() : "";
@@ -74,8 +84,8 @@ export const assignQnbInvoiceAraOnay = onRequest({ region: "europe-west1" }, asy
     }
 
     const targetRole = await getProfileRoleNormalized(targetUid);
-    if (targetRole !== "ara_onay") {
-      return res.status(400).json({ error: "Hedef kullanıcı ara onay rolünde değil" });
+    if (!YONLENDIRME_HEDEF_ROLLER.has(targetRole)) {
+      return res.status(400).json({ error: "Hedef kullanıcı yönlendirilebilir bir rolde değil" });
     }
 
     const ref = db.collection("qnb_invoices").doc(docId);
@@ -102,17 +112,30 @@ export const assignQnbInvoiceAraOnay = onRequest({ region: "europe-west1" }, asy
       return res.status(403).json({ error: "Bu faturayı yönlendirme yetkiniz yok" });
     }
 
-    await ref.set(
-      {
-        araOnayAtananUid: targetUid,
-        araOnayYonlendirenUid: user.uid,
-        araOnayYonlendirildiAt: FieldValue.serverTimestamp(),
-        updatedAt: FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
+    /** @type {Record<string, unknown>} */
+    const patch = {
+      araOnayYonlendirenUid: user.uid,
+      araOnayYonlendirildiAt: FieldValue.serverTimestamp(),
+      updatedAt: FieldValue.serverTimestamp(),
+    };
+    let yeniOnayDurumu = onay;
+    if (targetRole === "nihai_onay") {
+      // Erdem'in "Onaya Sun"u ile aynı: fatura ara kuyruktan çıkar, hedefin nihai kuyruğuna düşer.
+      yeniOnayDurumu = "onaya sunuldu";
+      patch.onayDurumu = yeniOnayDurumu;
+      patch.onayTarihi = FieldValue.serverTimestamp();
+      patch.onaylayanUid = user.uid;
+      patch.nihaiOnayAtananUid = targetUid;
+      patch.onayaSunanUid = user.uid;
+      const callerBirim = String(callerData.birim || "").trim();
+      if (callerBirim) patch.onayaSunanBirim = callerBirim;
+    } else {
+      patch.araOnayAtananUid = targetUid;
+    }
 
-    return res.status(200).json({ success: true, docId, targetUid });
+    await ref.set(patch, { merge: true });
+
+    return res.status(200).json({ success: true, docId, targetUid, targetRole, onayDurumu: yeniOnayDurumu });
   } catch (e) {
     const status = e?.status && Number(e.status) >= 400 ? Number(e.status) : 500;
     return res.status(status).json({ error: String(e?.message || e) });
