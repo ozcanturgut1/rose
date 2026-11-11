@@ -5,6 +5,7 @@ ensureAdmin();
 
 import { requireAuth } from "./requireAuth.js";
 import { YONLENDIRME_HEDEF_ROLLER } from "./listAraOnayUsers.js";
+import { onayZinciriEkle } from "./updateQnbInvoiceYonetimOnay.js";
 
 const db = getFirestore();
 
@@ -129,6 +130,7 @@ export const assignQnbInvoiceAraOnay = onRequest({ region: "europe-west1" }, asy
       patch.onayaSunanUid = user.uid;
       const callerBirim = String(callerData.birim || "").trim();
       if (callerBirim) patch.onayaSunanBirim = callerBirim;
+      Object.assign(patch, onayZinciriEkle(data, user.uid, callerData, "onaya_sundu"));
     } else {
       patch.araOnayAtananUid = targetUid;
     }

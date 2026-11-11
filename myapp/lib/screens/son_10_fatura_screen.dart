@@ -28,7 +28,8 @@ import 'invoice_pdf_review_screen.dart';
 ///   manuel yöneltilen faturaları görür.
 ///   `suppliers/sinan` ve `suppliers/yasin` içindeki VKN’ye ait, durumu boş
 ///   faturalar portaldan doğrudan ilgili ekrana düşer.
-/// - `muhasebe` → açılır liste: arşiv bekliyor / onaylandı / reddedildi / onay bekliyor (Ara+Nihai kuyrukları)
+/// - `muhasebe` → açılır liste: arşiv bekliyor / onaylandı / reddedildi / onay bekliyor (Ara+Nihai kuyrukları).
+///   Onay bekliyor satırında parantez, faturanın o an durduğu ekranın birimini gösterir.
 ///
 /// **Arşiv bekliyor**: nihai onay sonrası ETA fatura kaydı tamamlanmış, ancak fatura ve
 /// irsaliyeleri henüz arşive taşınmamış kayıtlar. Muhasebe kaydı kontrol edip
@@ -56,6 +57,21 @@ class Son10FaturaScreen extends StatefulWidget {
 
 /// Muhasebe listesi: Firestore `onayDurumu` veya bekleyen kuyruk görünümü.
 enum _MuhasebeFiltre { arsivBekliyor, onaylandi, reddedildi, onayBekliyor }
+
+/// Onay kuyruğundaki bir faturayı kendi listesinde gören kullanıcı.
+class _OnayEkrani {
+  const _OnayEkrani({
+    required this.uid,
+    required this.birim,
+    required this.rol,
+    required this.sube,
+  });
+
+  final String uid;
+  final String birim;
+  final String rol;
+  final String sube;
+}
 
 class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
   bool loading = true;
@@ -272,32 +288,120 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     return s == _reddedildiDurumuValue;
   }
 
-  /// E-posta ise `@` öncesi; ad soyad gibi kısa metin olduğu gibi.
-  static String _kisaYazarEtiketi(String? raw) {
-    final v = raw?.trim() ?? '';
-    if (v.isEmpty) return '';
-    if (v.contains('@')) {
-      final i = v.indexOf('@');
-      if (i > 0) {
-        final local = v.substring(0, i).trim();
-        if (local.isNotEmpty) return local;
-      }
+  /// Muhasebe "Onay bekliyor" listesinin kullandığı ekranlar ve birim VKN listeleri.
+  ///
+  /// Liste süzmesiyle aynı kaynak: `user_profiles.birim` + `suppliers/{birim}`.
+  Future<
+      ({
+        List<_OnayEkrani> ekranlar,
+        Map<String, Set<String>> vknByBirim,
+        Map<String, String> plakaYeri,
+      })> _loadOnayEkranlari() async {
+    final profSnap = await FirebaseFirestore.instance.collection('user_profiles').get();
+    final ekranlar = <_OnayEkrani>[];
+    for (final d in profSnap.docs) {
+      final data = d.data();
+      final rol = (data['role']?.toString() ?? '')
+          .trim()
+          .toLowerCase()
+          .replaceAll(RegExp(r'\s+'), '_');
+      if (rol != 'ara_onay' && rol != 'ikinci_ara_onay' && rol != 'nihai_onay') continue;
+      ekranlar.add(
+        _OnayEkrani(
+          uid: d.id,
+          birim: (data['birim']?.toString() ?? '').trim(),
+          rol: rol,
+          sube: _normBirim(data['sube']?.toString() ?? ''),
+        ),
+      );
     }
-    return v;
+    final supSnap = await FirebaseFirestore.instance.collection('suppliers').get();
+    final vknByBirim = <String, Set<String>>{};
+    for (final d in supSnap.docs) {
+      vknByBirim[d.id] = _vknsFromSupplierDocData(d.data());
+    }
+    final aracSnap = await FirebaseFirestore.instance.collection('company_vehicles').get();
+    final plakaYeri = <String, String>{};
+    for (final d in aracSnap.docs) {
+      final x = d.data();
+      if (x['aktif'] == false) continue;
+      final key = _plakaNorm(x['plakaNormalize']?.toString() ?? d.id);
+      final yer = _normBirim(x['kullanimYeri']?.toString() ?? '');
+      if (key.isNotEmpty && yer.isNotEmpty) plakaYeri[key] = yer;
+    }
+    return (ekranlar: ekranlar, vknByBirim: vknByBirim, plakaYeri: plakaYeri);
   }
 
-  /// Onay bekliyor: kuyruk + varsa son açıklama yazarı (e-postada `@` öncesi).
-  static String _beklemeParantezMetni({
+  static String _ekranBirimleri(Iterable<String> birimler) {
+    final adlar = birimler.map((s) => s.trim()).where((s) => s.isNotEmpty).toSet().toList()
+      ..sort();
+    return adlar.join(', ');
+  }
+
+  /// Onay bekliyor: kuyruk + faturanın o an göründüğü ekranın birimi.
+  ///
+  /// Ara kuyrukta atama varsa yalnızca o kullanıcı. Atama yoksa VKN'si
+  /// `suppliers/{birim}` içinde olan ara onay ekranları ve, listesi doluysa,
+  /// Sinan ile Yasin'in doğrudan düşen faturaları. Nihai kuyrukta atama varsa
+  /// o kullanıcı; yoksa birimi `sinan` olmayan nihai onay ekranları.
+  static String _bekleyenEkranParantezi({
     required bool nihaiKuyruk,
     required Map<String, dynamic> data,
+    required List<_OnayEkrani> ekranlar,
+    required Map<String, Set<String>> vknByBirim,
+    required Map<String, String> plakaYeri,
   }) {
     final kuyruk = nihaiKuyruk ? 'Nihai onay' : 'Ara onay';
-    final y = nihaiKuyruk
-        ? data['onayAciklamaNihaiOnayYazanAd']?.toString()
-        : data['onayAciklamaAraOnayYazanAd']?.toString();
-    final short = _kisaYazarEtiketi(y);
-    if (short.isNotEmpty) return '($kuyruk · $short)';
-    return '($kuyruk)';
+    final adlar = <String>{};
+    if (nihaiKuyruk) {
+      final hedef = (data['nihaiOnayAtananUid']?.toString() ?? '').trim();
+      if (hedef.isNotEmpty) {
+        for (final e in ekranlar) {
+          if (e.uid == hedef) adlar.add(e.birim);
+        }
+      } else {
+        for (final e in ekranlar) {
+          if (e.rol != 'nihai_onay') continue;
+          if (_normBirim(e.birim) == 'sinan') continue;
+          adlar.add(e.birim);
+        }
+      }
+    } else {
+      final assigned = (data['araOnayAtananUid']?.toString() ?? '').trim();
+      final yonlendiren = (data['araOnayYonlendirenUid']?.toString() ?? '').trim();
+      final sube = _hedefSubeBirimi(
+        data,
+        ekranlar: ekranlar,
+        vknByBirim: vknByBirim,
+        plakaYeri: plakaYeri,
+      );
+      if (sube.isNotEmpty && yonlendiren.isEmpty) {
+        adlar.add(sube);
+      } else if (assigned.isNotEmpty) {
+        for (final e in ekranlar) {
+          if (e.uid != assigned) continue;
+          if (e.rol == 'ara_onay' || e.rol == 'ikinci_ara_onay' || e.rol == 'nihai_onay') {
+            adlar.add(e.birim);
+          }
+        }
+      } else {
+        final vkn = _invoiceSupplierVknDigits(data);
+        for (final e in ekranlar) {
+          if (e.birim.isEmpty || vkn == null) continue;
+          final allowed = vknByBirim[e.birim] ?? const <String>{};
+          if (allowed.isEmpty || !allowed.contains(vkn)) continue;
+          if (e.rol == 'ara_onay' || e.rol == 'ikinci_ara_onay') {
+            adlar.add(e.birim);
+          } else if (e.rol == 'nihai_onay') {
+            final norm = _normBirim(e.birim);
+            if (norm == 'sinan' || norm == 'yasin') adlar.add(e.birim);
+          }
+        }
+      }
+    }
+    final etiket = _ekranBirimleri(adlar);
+    if (etiket.isEmpty) return '($kuyruk)';
+    return '($kuyruk · $etiket)';
   }
 
   static String _sortKeyFromListItem(Map<String, dynamic> it) {
@@ -337,6 +441,159 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
       if (g.isNotEmpty) return g;
     }
     return null;
+  }
+
+  /// `functions/subeAciklamaAtama.js` ile aynı şube kuralları.
+  static const String _negoTemizlikVkn = '6301027360';
+  static const String _istanbulOlukluVkn = '4810588203';
+  static const String _ileriAmbalajVkn = '4710403705';
+  static const String _kazimAkdagVkn = '19615423326';
+  static const String _arasKargoVkn = '0720039666';
+
+  static String _faturaNotMetni(Map<String, dynamic> data) {
+    final parts = <String>[];
+    void add(dynamic raw) {
+      if (raw == null) return;
+      if (raw is String) {
+        final t = raw.trim();
+        if (t.isNotEmpty) parts.add(t);
+        return;
+      }
+      if (raw is List) {
+        for (final e in raw) {
+          add(e);
+        }
+        return;
+      }
+      if (raw is Map) {
+        add(raw['#text'] ?? raw['#TEXT']);
+      }
+    }
+
+    final up = data['ublParsed'];
+    if (up is Map) {
+      final inv = up['Invoice'];
+      if (inv is Map) add(inv['Note']);
+      if (inv is List && inv.isNotEmpty && inv.first is Map) {
+        add(Map<String, dynamic>.from(inv.first as Map)['Note']);
+      }
+    }
+    final ubl = data['contentUbl']?.toString() ?? '';
+    if (ubl.isNotEmpty) {
+      final re = RegExp(r'<cbc:Note[^>]*>([\s\S]*?)</cbc:Note>', caseSensitive: false);
+      for (final m in re.allMatches(ubl)) {
+        final t = (m.group(1) ?? '').replaceAll(RegExp(r'<[^>]+>'), '').trim();
+        if (t.isNotEmpty) parts.add(t);
+      }
+    }
+    return parts.join(' ');
+  }
+
+  static String _musteriAdresMetni(Map<String, dynamic> data) {
+    final ubl = data['contentUbl']?.toString() ?? '';
+    if (ubl.isNotEmpty) {
+      final m = RegExp(
+        r'<cac:AccountingCustomerParty\b[\s\S]*?</cac:AccountingCustomerParty>',
+        caseSensitive: false,
+      ).firstMatch(ubl);
+      if (m != null) return m.group(0) ?? '';
+    }
+    final up = data['ublParsed'];
+    if (up is Map) {
+      final inv = up['Invoice'];
+      if (inv is Map) return inv['AccountingCustomerParty']?.toString() ?? '';
+    }
+    return '';
+  }
+
+  static String _kalemMetni(Map<String, dynamic> data) {
+    final ubl = data['contentUbl']?.toString() ?? '';
+    if (ubl.isNotEmpty) {
+      final re = RegExp(r'<cac:InvoiceLine\b[\s\S]*?</cac:InvoiceLine>', caseSensitive: false);
+      final parts = re.allMatches(ubl).map((m) => m.group(0) ?? '').where((s) => s.isNotEmpty);
+      if (parts.isNotEmpty) return parts.join(' ');
+    }
+    final up = data['ublParsed'];
+    if (up is Map) {
+      final inv = up['Invoice'];
+      if (inv is Map) return inv['InvoiceLine']?.toString() ?? '';
+    }
+    return '';
+  }
+
+  static bool _fabrikaIsareti(String metin, {bool tekirdag = false}) {
+    final n = _normBirim(metin);
+    if (n.contains('fabrika') || n.contains('corlu')) return true;
+    return tekirdag && n.contains('tekirdag');
+  }
+
+  static String _plakaNorm(String raw) {
+    var s = raw.trim().toUpperCase().replaceAll('İ', 'I');
+    return s.replaceAll(RegExp(r'[^A-Z0-9]'), '');
+  }
+
+  static Set<String> _plakalar(Map<String, dynamic> data) {
+    final ubl = data['contentUbl']?.toString() ?? '';
+    final text = ubl.isNotEmpty ? ubl : (data['ublParsed']?.toString() ?? '');
+    final re = RegExp(r'\b(0[1-9]|[1-7]\d|8[0-1])\s?([A-Za-z]{1,3})\s?(\d{2,4})\b');
+    final out = <String>{};
+    for (final m in re.allMatches(text)) {
+      out.add(_plakaNorm('${m.group(1)}${m.group(2)}${m.group(3)}'));
+    }
+    out.remove('');
+    return out;
+  }
+
+  /// Boş dize: bu fatura için şube kuralı yok veya plaka ayrılmadı.
+  static String _hedefSubeBirimi(
+    Map<String, dynamic> data, {
+    required List<_OnayEkrani> ekranlar,
+    required Map<String, Set<String>> vknByBirim,
+    required Map<String, String> plakaYeri,
+  }) {
+    final vkn = _invoiceSupplierVknDigits(data) ?? '';
+    if (vkn.isEmpty) return '';
+    if (vkn == _negoTemizlikVkn) {
+      return _fabrikaIsareti(_faturaNotMetni(data)) ? 'elif' : 'yasin';
+    }
+    if (vkn == _istanbulOlukluVkn) {
+      return _fabrikaIsareti(_kalemMetni(data)) ? 'ayse' : 'iplik';
+    }
+    if (vkn == _ileriAmbalajVkn) {
+      return _fabrikaIsareti(_faturaNotMetni(data)) ? 'ayse' : 'iplik';
+    }
+    if (vkn == _arasKargoVkn) {
+      final adres = _normBirim(_musteriAdresMetni(data));
+      if (adres.contains('corlu')) return 'elif';
+      if (adres.contains('istanbul')) return 'yasin';
+      return '';
+    }
+    if (vkn == _kazimAkdagVkn) {
+      final yerler = <String>{};
+      for (final p in _plakalar(data)) {
+        final yer = plakaYeri[p];
+        if (yer != null && yer.isNotEmpty) yerler.add(yer);
+      }
+      if (yerler.length != 1) return '';
+      final yer = yerler.first;
+      if (yer == 'fabrika') return 'ayse';
+      if (yer == 'merkez') return 'iplik';
+      if (yer == 'giyim') return 'giyim';
+      return '';
+    }
+    final fabrika = <String>{};
+    final merkez = <String>{};
+    for (final e in ekranlar) {
+      final allowed = vknByBirim[e.birim] ?? const <String>{};
+      if (!allowed.contains(vkn)) continue;
+      if (e.sube == 'fabrika') fabrika.add(e.birim);
+      if (e.sube == 'merkez') merkez.add(e.birim);
+    }
+    if (fabrika.length != 1 || merkez.length != 1) return '';
+    final tum = (data['contentUbl']?.toString().trim().isNotEmpty ?? false)
+        ? data['contentUbl'].toString()
+        : '${_faturaNotMetni(data)} ${_kalemMetni(data)}';
+    return _fabrikaIsareti(tum, tekirdag: true) ? fabrika.first : merkez.first;
   }
 
   /// `suppliers/{docId}` → `vkns` | `vkn` | `vknList` (dizi veya virgülle ayrılmış metin).
@@ -421,6 +678,10 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     final portalVkns = (mode == 'nihai_onay' && portalVknBirim && profileBirim.isNotEmpty)
         ? await _fetchSupplierVknsForBirim(profileBirim)
         : null;
+    final subeGerekli = mode == 'ara_onay' ||
+        mode == 'nihai_onay' ||
+        (mode == 'muhasebe' && _muhasebeFiltre == _MuhasebeFiltre.onayBekliyor);
+    final ekranBaglam = subeGerekli ? await _loadOnayEkranlari() : null;
     if (mode == 'muhasebe' && _muhasebeFiltre == _MuhasebeFiltre.onayBekliyor) {
       final araDocs = await _paginateByDocId(
         () => col.orderBy(FieldPath.documentId),
@@ -441,8 +702,13 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
         final item = _invoiceDocToListItem(data);
         item['invoiceDocId'] = d.id;
         item['araOnayAtananUid'] = data['araOnayAtananUid']?.toString();
-        item['muhasebeBeklemeParantez'] =
-            _beklemeParantezMetni(nihaiKuyruk: false, data: data);
+        item['muhasebeBeklemeParantez'] = _bekleyenEkranParantezi(
+          nihaiKuyruk: false,
+          data: data,
+          ekranlar: ekranBaglam!.ekranlar,
+          vknByBirim: ekranBaglam.vknByBirim,
+          plakaYeri: ekranBaglam.plakaYeri,
+        );
         out.add(item);
       }
       for (final d in nihaiDocs) {
@@ -452,8 +718,13 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
         final item = _invoiceDocToListItem(data);
         item['invoiceDocId'] = d.id;
         item['araOnayAtananUid'] = data['araOnayAtananUid']?.toString();
-        item['muhasebeBeklemeParantez'] =
-            _beklemeParantezMetni(nihaiKuyruk: true, data: data);
+        item['muhasebeBeklemeParantez'] = _bekleyenEkranParantezi(
+          nihaiKuyruk: true,
+          data: data,
+          ekranlar: ekranBaglam!.ekranlar,
+          vknByBirim: ekranBaglam.vknByBirim,
+          plakaYeri: ekranBaglam.plakaYeri,
+        );
         out.add(item);
       }
       out.sort((x, y) => _sortKeyFromListItem(y).compareTo(_sortKeyFromListItem(x)));
@@ -500,9 +771,18 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
       if (mode == 'ara_onay') {
         if (onay.isNotEmpty) continue;
         final assigned = (data['araOnayAtananUid']?.toString() ?? '').trim();
-        if (assigned.isNotEmpty && assigned != myUid) continue;
-        if (assigned.isEmpty) {
-          if (profileBirim.isNotEmpty) {
+        final yonlendiren = (data['araOnayYonlendirenUid']?.toString() ?? '').trim();
+        final sube = _hedefSubeBirimi(
+          data,
+          ekranlar: ekranBaglam!.ekranlar,
+          vknByBirim: ekranBaglam.vknByBirim,
+          plakaYeri: ekranBaglam.plakaYeri,
+        );
+        if (sube.isNotEmpty && yonlendiren.isEmpty) {
+          if (_normBirim(profileBirim) != sube) continue;
+        } else {
+          if (assigned.isNotEmpty && assigned != myUid) continue;
+          if (assigned.isEmpty && profileBirim.isNotEmpty) {
             final allowed = araOnaySupplierVkns ?? <String>{};
             if (allowed.isEmpty) continue;
             final vkn = _invoiceSupplierVknDigits(data);
@@ -521,7 +801,18 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
             portalVkns.isNotEmpty &&
             onay.isEmpty) {
           final assigned = (data['araOnayAtananUid']?.toString() ?? '').trim();
-          if (assigned.isNotEmpty) continue;
+          final yonlendiren = (data['araOnayYonlendirenUid']?.toString() ?? '').trim();
+          final sube = _hedefSubeBirimi(
+            data,
+            ekranlar: ekranBaglam!.ekranlar,
+            vknByBirim: ekranBaglam.vknByBirim,
+            plakaYeri: ekranBaglam.plakaYeri,
+          );
+          if (sube.isNotEmpty && yonlendiren.isEmpty) {
+            if (_normBirim(profileBirim) != sube) continue;
+          } else if (assigned.isNotEmpty && assigned != myUid) {
+            continue;
+          }
           final vkn = _invoiceSupplierVknDigits(data);
           if (vkn == null || !portalVkns.contains(vkn)) continue;
         } else {

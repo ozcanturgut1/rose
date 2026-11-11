@@ -1,5 +1,5 @@
 import { onRequest } from "firebase-functions/v2/https";
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
 import { getAuth } from "firebase-admin/auth";
 import { ensureAdmin } from "./adminInit.js";
 ensureAdmin();
@@ -38,6 +38,43 @@ function onayaSunanKaydi(uid, callerData) {
   const out = { onayaSunanUid: uid };
   if (birim) out.onayaSunanBirim = birim;
   return out;
+}
+
+/**
+ * Onaya sunma ve reddi `onayZinciri` dizisinin sonuna ekler.
+ * Dizi boşsa, daha önce yazılmış tek `onayaSunanUid` ilk adım olarak korunur.
+ * `serverTimestamp` dizi elemanında kullanılamadığı için saat sunucuda üretilir.
+ * @param {Record<string, unknown>} data
+ * @param {string} uid
+ * @param {Record<string, unknown>} callerData
+ * @param {"onaya_sundu" | "reddetti"} islem
+ */
+export function onayZinciriEkle(data, uid, callerData, islem) {
+  const birim = String(callerData?.birim || "").trim();
+  const now = Timestamp.now();
+  /** @type {{ uid: string, islem: string, at: Timestamp, birim?: string }[]} */
+  const adimlar = [];
+  const mevcut = Array.isArray(data?.onayZinciri) ? data.onayZinciri : [];
+  if (mevcut.length === 0) {
+    const eskiUid = String(data?.onayaSunanUid || "").trim();
+    const eskiBirim = String(data?.onayaSunanBirim || "").trim();
+    const ayniSunus = eskiUid === uid && islem === "onaya_sundu";
+    if (eskiUid && !ayniSunus) {
+      /** @type {{ uid: string, islem: string, at: Timestamp, birim?: string }} */
+      const eski = {
+        uid: eskiUid,
+        islem: "onaya_sundu",
+        at: Timestamp.fromMillis(now.toMillis() - 1),
+      };
+      if (eskiBirim) eski.birim = eskiBirim;
+      adimlar.push(eski);
+    }
+  }
+  /** @type {{ uid: string, islem: string, at: Timestamp, birim?: string }} */
+  const adim = { uid, islem, at: now };
+  if (birim) adim.birim = birim;
+  adimlar.push(adim);
+  return { onayZinciri: FieldValue.arrayUnion(...adimlar) };
 }
 
 /** @param {string | undefined} raw */
@@ -220,6 +257,7 @@ export const updateQnbInvoiceYonetimOnay = onRequest({ region: "europe-west1" },
         patch.nihaiOnayAtananUid = sinanUid;
       }
       Object.assign(patch, onayaSunanKaydi(user.uid, callerData));
+      Object.assign(patch, onayZinciriEkle(data, user.uid, callerData, "onaya_sundu"));
       await ref.set(patch, { merge: true });
       return res.status(200).json({
         success: true,
@@ -234,9 +272,11 @@ export const updateQnbInvoiceYonetimOnay = onRequest({ region: "europe-west1" },
     patch.onaylayanUid = user.uid;
     if (decision === "onaya_sunuldu") {
       Object.assign(patch, onayaSunanKaydi(user.uid, callerData));
+      Object.assign(patch, onayZinciriEkle(data, user.uid, callerData, "onaya_sundu"));
     }
 
     if (onayDurumu === "reddedildi") {
+      Object.assign(patch, onayZinciriEkle(data, user.uid, callerData, "reddetti"));
       const profRol = normalizeProfileRole(callerData.role);
       if (profRol === "ara_onay" || profRol === "ikinci_ara_onay" || profRol === "nihai_onay") {
         patch.reddedenRol = profRol;

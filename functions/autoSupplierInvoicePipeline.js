@@ -39,6 +39,7 @@ import {
   despatchDocIdFromBelgeNo,
   itemBelgeNo,
 } from "./qnbDespatchPortalLookup.js";
+import { applyAciklamaSubeAtamasi } from "./subeAciklamaAtama.js";
 
 const db = getFirestore();
 
@@ -463,6 +464,16 @@ async function runStep1IngestSupplierInvoices(startedAtMs) {
     enriched += results.filter(
       (r) => r.status === "fulfilled" && r.value
     ).length;
+    await Promise.all(
+      chunk.map((id) =>
+        applyAciklamaSubeAtamasi(id).catch((err) => {
+          logger.warn("autoPipeline sube atamasi failed", {
+            id,
+            err: String(err?.message || err).slice(0, 200),
+          });
+        })
+      )
+    );
   }
 
   return {

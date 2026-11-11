@@ -2345,13 +2345,70 @@ Future<String> _onayaSunanMetni(Map<String, dynamic> inv) async {
     uid = inv['araOnayYonlendirenUid']?.toString().trim() ?? '';
   }
   if (uid.isEmpty) return '';
+  return _profilBirimi(uid);
+}
+
+Future<String> _profilBirimi(String uid) async {
+  final id = uid.trim();
+  if (id.isEmpty) return '';
   try {
-    final snap =
-        await FirebaseFirestore.instance.collection('user_profiles').doc(uid).get();
+    final snap = await FirebaseFirestore.instance.collection('user_profiles').doc(id).get();
     return snap.data()?['birim']?.toString().trim() ?? '';
   } catch (_) {
     return '';
   }
+}
+
+int _zincirZamani(dynamic at) {
+  if (at is Timestamp) return at.millisecondsSinceEpoch;
+  return 0;
+}
+
+String _zincirAdimMetni(String birim, String islem) {
+  final eylem = islem == 'reddetti' ? 'reddetti' : 'onaya sundu';
+  return '$birim $eylem';
+}
+
+/// Onaya sunan ve reddeden kişiler, kayıt sırasıyla.
+///
+/// Yeni kayıtlarda `onayZinciri`. Eski faturalarda son onaya sunan ve varsa reddeden.
+Future<String> _onayZinciriMetni(Map<String, dynamic> inv) async {
+  final ham = inv['onayZinciri'];
+  final adimlar = <({int ms, String birim, String uid, String islem})>[];
+  if (ham is List) {
+    for (final e in ham) {
+      if (e is! Map) continue;
+      final m = Map<String, dynamic>.from(e);
+      final islem = m['islem']?.toString().trim() ?? '';
+      if (islem != 'onaya_sundu' && islem != 'reddetti') continue;
+      adimlar.add((
+        ms: _zincirZamani(m['at']),
+        birim: m['birim']?.toString().trim() ?? '',
+        uid: m['uid']?.toString().trim() ?? '',
+        islem: islem,
+      ));
+    }
+  }
+  adimlar.sort((a, b) => a.ms.compareTo(b.ms));
+
+  final satirlar = <String>[];
+  if (adimlar.isNotEmpty) {
+    for (final a in adimlar) {
+      var birim = a.birim;
+      if (birim.isEmpty) birim = await _profilBirimi(a.uid);
+      if (birim.isEmpty) continue;
+      satirlar.add(_zincirAdimMetni(birim, a.islem));
+    }
+  } else {
+    final sunan = await _onayaSunanMetni(inv);
+    if (sunan.isNotEmpty) satirlar.add(_zincirAdimMetni(sunan, 'onaya_sundu'));
+    final redUid = inv['reddedenUid']?.toString().trim() ?? '';
+    if (redUid.isNotEmpty) {
+      final birim = await _profilBirimi(redUid);
+      if (birim.isNotEmpty) satirlar.add(_zincirAdimMetni(birim, 'reddetti'));
+    }
+  }
+  return satirlar.join(' → ');
 }
 
 /// [InvoicePdfReviewScreen._allOnayAciklamalarDisplayText] ile aynı mantık.
@@ -2581,7 +2638,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
     final onayAcikText = _onayAciklamalarDisplayFromMap(mergedOnay);
     final ettnStr = mergedOnay['ettn']?.toString().trim();
     final onayDurumuStr = mergedOnay['onayDurumu']?.toString().trim();
-    final onayaSunan = await _onayaSunanMetni(mergedOnay);
+    final onayZinciri = await _onayZinciriMetni(mergedOnay);
 
     final baslik = _faturaBaslikAlanlari(invData);
     final faturaOzeti = <String, dynamic>{
@@ -2611,7 +2668,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
       else if (ettnStr != null && ettnStr.isNotEmpty)
         'ettn': ettnStr,
       if (onayDurumuStr != null && onayDurumuStr.isNotEmpty) 'onayDurumu': onayDurumuStr,
-      if (onayaSunan.isNotEmpty) 'onayaSunan': onayaSunan,
+      if (onayZinciri.isNotEmpty) 'onayZinciri': onayZinciri,
     };
 
     final irsaliyeler = <Map<String, dynamic>>[];
@@ -3071,7 +3128,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
     final cs = Theme.of(context).colorScheme;
     final acik = _fmt(f['onayAciklamalarText']);
     final durum = f['onayDurumu']?.toString().trim();
-    final sunan = f['onayaSunan']?.toString().trim();
+    final zincir = f['onayZinciri']?.toString().trim();
     final ettn = f['ettn']?.toString().trim();
 
     return Column(
@@ -3092,10 +3149,10 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
             style: const TextStyle(fontSize: 13),
           ),
         ],
-        if (sunan != null && sunan.isNotEmpty) ...[
+        if (zincir != null && zincir.isNotEmpty) ...[
           const SizedBox(height: 6),
           Text(
-            'Onaya sunan: $sunan',
+            'Onay zinciri: $zincir',
             style: const TextStyle(fontSize: 13),
           ),
         ],
