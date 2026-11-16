@@ -1651,6 +1651,62 @@ async function resolveErgulKargoNakliyeStok(wPool, supplierVkn) {
   return { stkkod, source: "ergul_nakliye" };
 }
 
+/**
+ * Çorlu OSB tek VKN altında ayrı cariler tutar. Geçmiş fiş sayısı aidatı seçer;
+ * su ve atıksu satır metninden ayrılır.
+ * Kodlar stok kartı değil, hizmet kartıdır (HIZMET). Stok kartı açılmaz.
+ * Su: 320 Ç1028 + SU GİDERİ-FABRİKA (730 4 02).
+ * Atıksu: 320 Ç1029 + AİDAT GİDERİ-FABRİKA (730 5 22).
+ */
+const CORLU_OSB_VKN = "8750360328";
+const CORLU_OSB_SU = { carkod: "320 Ç1028", stok: "SU GİDERİ-FABRİKA" };
+const CORLU_OSB_ATIKSU = { carkod: "320 Ç1029", stok: "AİDAT GİDERİ-FABRİKA" };
+
+export function corluOsbKayitTanimi(supplierVkn, lines) {
+  if (normalizeVknDigits(supplierVkn) !== CORLU_OSB_VKN) return null;
+  const metin = normalizeMatchText(
+    (Array.isArray(lines) ? lines : [])
+      .map((l) =>
+        [l?.stokCinsi, l?.description, l?.lineAciklama, l?.kullaniciKalemAciklama]
+          .filter(Boolean)
+          .join(" ")
+      )
+      .join(" ")
+  );
+  if (!metin) return null;
+  if (metin.includes("atiksu") || metin.includes("kirlilik") || metin.includes("koi")) {
+    return { ...CORLU_OSB_ATIKSU, gider: true };
+  }
+  if (metin.includes("su bedeli") || metin.includes("kuyu")) {
+    return { ...CORLU_OSB_SU, gider: true };
+  }
+  return null;
+}
+
+async function resolveHizmetKodu(pool, kod) {
+  const c = String(kod || "").trim();
+  if (!c) return null;
+  const rs = await pool
+    .request()
+    .input("kod", sql.NVarChar(40), c)
+    .query(
+      "SELECT TOP 1 LTRIM(RTRIM(HIZKOD)) AS kod FROM dbo.HIZMET WITH (NOLOCK) WHERE HIZKOD = @kod"
+    );
+  const found = String(rs.recordset[0]?.kod || "").trim();
+  return found || null;
+}
+
+async function resolveCorluOsbStok(wPool, supplierVkn, lines) {
+  const tanim = corluOsbKayitTanimi(supplierVkn, lines);
+  if (!tanim) return null;
+  const hizmet = await resolveHizmetKodu(wPool, tanim.stok);
+  if (!hizmet) {
+    console.warn("Çorlu OSB hizmet kartı bulunamadı:", tanim.stok);
+    return null;
+  }
+  return { stkkod: hizmet, source: "corlu_osb_hizmet" };
+}
+
 /** Tedarikçi geçmişinden gelen STKKOD; kullanıcı aile öneki (A3 vb.) ile STKKART alternatifi. */
 async function resolveStockFromHistoryMatch(wPool, historyMatch, line, opts) {
   const allowAutoStk = opts?.allowAutoStk !== false;
@@ -1673,7 +1729,14 @@ async function resolveStockFromHistoryMatch(wPool, historyMatch, line, opts) {
   itemCodeResolved = await resolveWriteStockCodeExact(wPool, historyCode);
   if (itemCodeResolved) {
     matchSource = "supplier_history_match";
-  } else if (historyCode && allowAutoStk) {
+  } else {
+    const hizmet = await resolveHizmetKodu(wPool, historyCode);
+    if (hizmet) {
+      itemCodeResolved = hizmet;
+      matchSource = "hizmet_karti";
+    }
+  }
+  if (!itemCodeResolved && historyCode && allowAutoStk) {
     try {
       await tryCloneStkkartFromTemplate(
         wPool,
@@ -1804,7 +1867,7 @@ async function findStockCodeBySupplierHistory(rPool, opts) {
 
   const lookbackMonths = Number(process.env.ETA_MATCH_LOOKBACK_MONTHS || 12);
   const candidateLimit = Number(process.env.ETA_MATCH_CANDIDATE_LIMIT || 300);
-  const cariResolved = await resolveCariKod(rPool, supplierVkn, invoiceCurrency);
+  const cariResolved = await resolveCariKod(rPool, supplierVkn, invoiceCurrency, [line]);
   const carkod = String(cariResolved?.carkod || "").trim();
   if (!carkod) return null;
 
@@ -1944,11 +2007,15 @@ async function findStockCodeBySupplierHistory(rPool, opts) {
  * VKN için cari seçimi. Döviz: read DB FATFIS geçmişi; yoksa tek cari veya alfabetik ilk.
  * @returns {{ carkod: string, reason: string } | null}
  */
-async function resolveCariKod(rPool, supplierVkn, currencyCode = "") {
+async function resolveCariKod(rPool, supplierVkn, currencyCode = "", lines = null) {
   const digits = normalizeVknDigits(supplierVkn);
   if (!digits) return null;
 
   const codes = await listCariKodsForVkn(rPool, digits);
+  const osb = corluOsbKayitTanimi(supplierVkn, lines);
+  if (osb?.carkod && codes.includes(osb.carkod)) {
+    return { carkod: osb.carkod, reason: "corlu_osb_satir", candidateCodes: codes };
+  }
   if (!codes.length) return null;
 
   const fromHistory = await pickCariByDovizHistoryForVkn(rPool, digits, currencyCode);
@@ -2245,7 +2312,8 @@ export async function previewStockLineMatches(afterData) {
     }
   }
   const ergulNakliyeStok = await resolveErgulKargoNakliyeStok(wPool, supplierVkn);
-  const zorunluStok = cekSenetStok || ergulNakliyeStok;
+  const corluOsbStok = await resolveCorluOsbStok(wPool, supplierVkn, usableLines);
+  const zorunluStok = cekSenetStok || ergulNakliyeStok || corluOsbStok;
   const lineMatches = [];
 
   for (let i = 0; i < usableLines.length; i++) {
@@ -2409,12 +2477,18 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     // kf null ise (tek cari / hiç döviz cari yok) normal mantığa düş.
     cariResolved =
       kf ||
-      (await resolveCariKod(rPool, supplierVkn, isForeignCurrencyEarly ? paraBirimiRaw : ""));
+      (await resolveCariKod(
+        rPool,
+        supplierVkn,
+        isForeignCurrencyEarly ? paraBirimiRaw : "",
+        rawLines
+      ));
   } else {
     cariResolved = await resolveCariKod(
       rPool,
       supplierVkn,
-      isForeignCurrencyEarly ? paraBirimiRaw : ""
+      isForeignCurrencyEarly ? paraBirimiRaw : "",
+      rawLines
     );
   }
 
@@ -2591,6 +2665,15 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     const tevTip = await resolveTevkifatAlisTipNo(rPool);
     if (!spSafeFatft.size || spSafeFatft.has(tevTip)) erpFaturaTipiNo = tevTip;
   }
+  if (corluOsbKayitTanimi(supplierVkn, rawLines)?.gider && !cls?.hasTevkifat && !cls?.isIade) {
+    const giderTipRs = await rPool.request().query(
+      "SELECT TOP 1 FATFTNO FROM dbo.FATFISTIP WITH (NOLOCK) WHERE FATFTKOD = N'GİDER' ORDER BY FATFTNO"
+    );
+    const giderTip = Number(giderTipRs.recordset[0]?.FATFTNO) || 0;
+    if (giderTip > 0 && (!spSafeFatft.size || spSafeFatft.has(giderTip))) {
+      erpFaturaTipiNo = giderTip;
+    }
+  }
 
   const lineMatches = [];
   const lineCurrency = [];
@@ -2694,7 +2777,8 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
   }
 
   const ergulNakliyeStok = await resolveErgulKargoNakliyeStok(wPool, supplierVkn);
-  const zorunluStok = cekSenetStok || ergulNakliyeStok;
+  const corluOsbStok = await resolveCorluOsbStok(wPool, supplierVkn, usableLines);
+  const zorunluStok = cekSenetStok || ergulNakliyeStok || corluOsbStok;
 
   for (let i = 0; i < usableLines.length; i++) {
     const l = usableLines[i];
@@ -2831,7 +2915,9 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     dr.input("FatFisRefNo", sql.Int, fatFisRefNo);
     dr.input("StokFisRefNo", sql.Int, stokFisRefNo);
     dr.input("SiraNumarasi", sql.Int, i + 1);
-    dr.input("FaturaTuru", sql.Int, 1);
+    // 1 stok, 2 hizmet. Hizmet kodu STKKART'ta yoktur; cins HIZMET.HIZADI olur.
+    const hizmetSatiri = matchSource === "corlu_osb_hizmet" || matchSource === "hizmet_karti";
+    dr.input("FaturaTuru", sql.Int, hizmetSatiri ? 2 : 1);
     dr.input("FaturaTarihi", sql.DateTime, faturaTarihi);
     dr.input("ErpCariKodu", sql.NVarChar(sql.MAX), erpCariKodu);
     dr.input("ErpDepoKodu", sql.NVarChar(sql.MAX), defaults.depo);
@@ -2868,8 +2954,8 @@ export async function syncApprovedInvoiceToEta(afterData, docId) {
     ) {
       const netPatch = roundMoney(alignedLine.netTl);
       const taxPatch = roundMoney(alignedLine.taxTl);
-      const dovTutar = roundMoney(alignedLine.docNet ?? 0);
-      const dovFiyat = roundMoney(alignedLine.docUnitPrice ?? 0);
+      const dovTutar = isForeignCurrency ? roundMoney(alignedLine.docNet ?? 0) : 0;
+      const dovFiyat = isForeignCurrency ? roundMoney(alignedLine.docUnitPrice ?? 0) : 0;
       await wPool
         .request()
         .input("ref", sql.Int, fatFisRefNo)
