@@ -26,7 +26,7 @@ function normalizeProfileRole(raw) {
 export const YONLENDIRME_HEDEF_ROLLER = new Set(["ara_onay", "ikinci_ara_onay", "nihai_onay"]);
 
 /** @param {string} uid */
-async function requireAraOnayProfile(uid) {
+async function requireYonlendirmeListeleyebilir(uid) {
   const p = await db.collection("user_profiles").doc(uid).get();
   if (!p.exists) {
     const err = new Error("Profil bulunamadı");
@@ -35,8 +35,8 @@ async function requireAraOnayProfile(uid) {
     throw err;
   }
   const r = normalizeProfileRole(p.data()?.role);
-  if (r !== "ara_onay") {
-    const err = new Error("Yalnızca ara onay kullanıcıları listeleyebilir");
+  if (r !== "ara_onay" && r !== "muhasebe") {
+    const err = new Error("Yalnızca ara onay veya muhasebe kullanıcıları listeleyebilir");
     // @ts-ignore
     err.status = 403;
     throw err;
@@ -45,7 +45,7 @@ async function requireAraOnayProfile(uid) {
 
 /**
  * Yönlendirme hedefi seçimi: `user_profiles` içinde rolü [YONLENDIRME_HEDEF_ROLLER]
- * kümesinde olanlar (`birim` dahil). Yalnızca ara onay kullanıcısı listeleyebilir.
+ * kümesinde olanlar (`birim` dahil). Ara onay ve muhasebe listeleyebilir.
  * GET — Authorization: Bearer idToken
  */
 export const listAraOnayUsers = onRequest({ region: "europe-west1" }, async (req, res) => {
@@ -55,7 +55,7 @@ export const listAraOnayUsers = onRequest({ region: "europe-west1" }, async (req
     if (req.method !== "GET") return res.status(405).send("Method Not Allowed");
 
     const user = await requireAuth(req);
-    await requireAraOnayProfile(user.uid);
+    await requireYonlendirmeListeleyebilir(user.uid);
 
     const snap = await db.collection("user_profiles").get();
     /** @type {{ uid: string; label: string; birim: string }[]} */

@@ -847,9 +847,8 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     _fromController = TextEditingController(text: _fmtYmd(from));
     _toController = TextEditingController(text: _fmtYmd(now));
     WidgetsBinding.instance.addPostFrameCallback((_) => _load());
-    // Yönlendirme diyaloğunun hedef listesi: fonksiyonun soğuk başlatması burada,
-    // arka planda ödenir. Yalnızca "Yönlendir" düğmesini gören rol (ara_onay) için.
-    if (_listFilterMode == 'ara_onay' && !_isIkinciAraOnay) {
+    // Yönlendirme hedef listesi: fonksiyonun soğuk başlatması burada ödenir.
+    if ((_listFilterMode == 'ara_onay' && !_isIkinciAraOnay) || _listFilterMode == 'muhasebe') {
       widget.api.prefetchAraOnayUsers();
     }
   }
@@ -1775,6 +1774,10 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
                                     final isAdmin = _listFilterMode == 'admin';
                                     final isNihai = _listFilterMode == 'nihai_onay';
                                     final isAraOnay = _listFilterMode == 'ara_onay';
+                                    final muhasebeRedYonlendir = _listFilterMode == 'muhasebe' &&
+                                        _muhasebeFiltre == _MuhasebeFiltre.reddedildi;
+                                    final yonlendirGoster =
+                                        (isAraOnay && !_isIkinciAraOnay) || muhasebeRedYonlendir;
                                     final arsiveTasinabilir =
                                         _listFilterMode == 'muhasebe' &&
                                             _arsiveTasinmayiBekliyor(it);
@@ -1926,7 +1929,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
                                       ),
                                       isThreeLine: false,
                                       onTap: () => _openInvoicePdfReview(it),
-                                      trailing: isAraOnay && !_isIkinciAraOnay
+                                      trailing: yonlendirGoster
                                           ? Row(
                                               mainAxisSize: MainAxisSize.min,
                                               children: [

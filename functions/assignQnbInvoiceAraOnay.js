@@ -22,10 +22,10 @@ function normalizeProfileRole(raw) {
 }
 
 /**
- * Çağıran ara onay olmalı; profil verisi (`birim` için) döner.
+ * Çağıran ara onay veya muhasebe olmalı.
  * @param {string} uid
  */
-async function requireAraOnayProfile(uid) {
+async function requireYonlendirenProfile(uid) {
   const p = await db.collection("user_profiles").doc(uid).get();
   if (!p.exists) {
     const err = new Error("Profil bulunamadı");
@@ -35,13 +35,20 @@ async function requireAraOnayProfile(uid) {
   }
   const data = p.data() || {};
   const r = normalizeProfileRole(data.role);
-  if (r !== "ara_onay") {
-    const err = new Error("Yalnızca ara onay kullanıcıları yönlendirebilir");
+  if (r !== "ara_onay" && r !== "muhasebe") {
+    const err = new Error("Yalnızca ara onay veya muhasebe kullanıcıları yönlendirebilir");
     // @ts-ignore
     err.status = 403;
     throw err;
   }
   return data;
+}
+
+function normOnayDurumu(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replaceAll("ı", "i");
 }
 
 /** @param {string} uid */
@@ -52,14 +59,18 @@ async function getProfileRoleNormalized(uid) {
 }
 
 /**
- * Ara onay kullanıcısı, bekleyen faturayı başka bir onay kullanıcısına yönlendirir.
+ * Ara onay, bekleyen faturayı başka bir onay kullanıcısına yönlendirir.
+ * Muhasebe, reddedilmiş faturayı aynı hedef listesine geri gönderir:
+ * ara hedefte `onayDurumu` silinir ve fatura o kişinin ara kuyruğuna düşer;
+ * nihai hedefte durum `onaya sunuldu` olur.
  * POST JSON: { docId, targetUid }
  * - Hedef rolü [YONLENDIRME_HEDEF_ROLLER] içinde olmalı (`listAraOnayUsers` ile aynı küme).
  * - Hedef `ara_onay` / `ikinci_ara_onay` (Erdem): `araOnayAtananUid` = hedef uid; fatura ara kuyrukta kalır.
  * - Hedef `nihai_onay` (Sinan, Yasin): `updateQnbInvoiceYonetimOnay` içindeki Erdem → Sinan yazımıyla aynı;
  *   `onayDurumu` = `onaya sunuldu`, `nihaiOnayAtananUid` = hedef uid, `onayaSunanUid/Birim` = çağıran.
- * - Atanmamışsa herhangi bir ara onay yönlendirebilir; başka birine atanmışsa yalnızca o kullanıcı
- *   yeniden yönlendirebilir. `onayDurumu` dolu fatura yönlendirilemez.
+ * - Ara onay: atanmamışsa herhangi bir ara onay yönlendirebilir; başka birine atanmışsa yalnızca o kullanıcı.
+ *   `onayDurumu` dolu fatura yönlendirilemez.
+ * - Muhasebe: yalnızca `reddedildi` fatura. Atama kısıtı aranmaz.
  */
 export const assignQnbInvoiceAraOnay = onRequest({ region: "europe-west1" }, async (req, res) => {
   try {
@@ -68,7 +79,8 @@ export const assignQnbInvoiceAraOnay = onRequest({ region: "europe-west1" }, asy
     if (req.method !== "POST") return res.status(405).send("Method Not Allowed");
 
     const user = await requireAuth(req);
-    const callerData = await requireAraOnayProfile(user.uid);
+    const callerData = await requireYonlendirenProfile(user.uid);
+    const callerRole = normalizeProfileRole(callerData.role);
 
     const body = typeof req.body === "object" && req.body ? req.body : {};
     const docId = body.docId != null ? String(body.docId).trim() : "";
@@ -100,17 +112,19 @@ export const assignQnbInvoiceAraOnay = onRequest({ region: "europe-west1" }, asy
     }
 
     const onay = String(data.onayDurumu || "").trim();
-    if (onay.length > 0) {
+    const reddedildi = normOnayDurumu(onay) === "reddedildi";
+    if (callerRole === "muhasebe") {
+      if (!reddedildi) {
+        return res.status(409).json({ error: "Muhasebe yalnızca reddedilen faturaları yönlendirebilir" });
+      }
+    } else if (onay.length > 0) {
       return res.status(409).json({ error: "Yalnızca onay bekleyen (onayDurumu boş) faturalar yönlendirilebilir" });
-    }
-
-    const currentAssigned = String(data.araOnayAtananUid || "").trim();
-
-    const mayAssign =
-      !currentAssigned || currentAssigned === user.uid;
-
-    if (!mayAssign) {
-      return res.status(403).json({ error: "Bu faturayı yönlendirme yetkiniz yok" });
+    } else {
+      const currentAssigned = String(data.araOnayAtananUid || "").trim();
+      const mayAssign = !currentAssigned || currentAssigned === user.uid;
+      if (!mayAssign) {
+        return res.status(403).json({ error: "Bu faturayı yönlendirme yetkiniz yok" });
+      }
     }
 
     /** @type {Record<string, unknown>} */
@@ -133,6 +147,11 @@ export const assignQnbInvoiceAraOnay = onRequest({ region: "europe-west1" }, asy
       Object.assign(patch, onayZinciriEkle(data, user.uid, callerData, "onaya_sundu"));
     } else {
       patch.araOnayAtananUid = targetUid;
+      patch.nihaiOnayAtananUid = FieldValue.delete();
+      if (reddedildi) {
+        patch.onayDurumu = FieldValue.delete();
+        yeniOnayDurumu = "";
+      }
     }
 
     await ref.set(patch, { merge: true });
