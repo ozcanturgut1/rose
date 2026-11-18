@@ -10,7 +10,7 @@ import "dotenv/config";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { ensureAdmin } from "../adminInit.js";
 
-const VKNS = ["7331158248", "9290365070", "8170637336"];
+const VKNS = ["7331158248", "9290365070", "8170637336", "3341103567"];
 
 async function main() {
   const apply = process.argv.slice(2).includes("--apply");

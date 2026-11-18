@@ -6,6 +6,7 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { syncApprovedInvoiceToEta } from "../etaInvoiceSync.js";
 import { formatEtaError } from "../etaError.js";
 import { evaluateAracPlakaKapisi } from "../plakaTespit.js";
+import { ARSIV_BEKLIYOR } from "../nihaiEkranKriteri.js";
 
 function normalizeStatus(value) {
   return String(value || "")
@@ -25,11 +26,6 @@ export const onQnbInvoiceApproved = onDocumentUpdated(
     memory: "512MiB",
   },
   async (event) => {
-    // Local worker mode: skip cloud-side SQL sync to avoid duplicate writes.
-    if (String(process.env.ETA_SQL_LOCAL_ONLY || "").trim() === "1") {
-      return;
-    }
-
     const db = getFirestore();
     const before = event.data?.before?.data() || {};
     const after = event.data?.after?.data() || {};
@@ -46,15 +42,31 @@ export const onQnbInvoiceApproved = onDocumentUpdated(
       return;
     }
 
-    if (!after.contentUbl || typeof after.contentUbl !== "string") {
-      console.warn("onQnbInvoiceApproved: missing contentUbl", docId);
+    // Kayıt, fatura Yasin veya Sinan ekranındayken bitmiş olabilir.
+    // Onay düşünce arşiv kuyruğu açılır; ETA'ya ikinci kez yazılmaz.
+    const etaStatus = normalizeStatus(after.etaKayitDurumu);
+    if (etaStatus === "tamamlandi") {
+      const arsiv = String(after.arsivDurumu || "").trim();
+      if (arsiv !== ARSIV_BEKLIYOR && arsiv !== "arsivlendi") {
+        await ref.set(
+          {
+            arsivDurumu: ARSIV_BEKLIYOR,
+            arsivBekliyorTarihi: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+        console.log("onQnbInvoiceApproved: eta kaydi vardi, arsiv kuyrugu acildi", docId);
+      }
       return;
     }
 
-    // Idempotency guard.
-    const etaStatus = normalizeStatus(after.etaKayitDurumu);
-    if (etaStatus === "tamamlandi") {
-      console.log("onQnbInvoiceApproved: already completed", docId);
+    // Local worker mode: skip cloud-side SQL sync to avoid duplicate writes.
+    if (String(process.env.ETA_SQL_LOCAL_ONLY || "").trim() === "1") {
+      return;
+    }
+
+    if (!after.contentUbl || typeof after.contentUbl !== "string") {
+      console.warn("onQnbInvoiceApproved: missing contentUbl", docId);
       return;
     }
 

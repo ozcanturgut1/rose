@@ -41,8 +41,8 @@ const setCors = (req, res) => {
 /**
  * Muhasebe kontrolü sonrası faturayı (ve ilgili irsaliyeleri) arşive taşır.
  *
- * Nihai onay sonrası ETA kaydı yapılır ancak arşivleme otomatik değildir; fatura
- * `arsivDurumu == "arsiv_bekliyor"` ile muhasebe listesinde bekler. Bu uç, muhasebe
+ * ETA kaydı fatura Yasin veya Sinan'ın ekranına düşünce yapılabilir. Arşiv kuyruğu
+ * ancak `onaylandı` ve ETA kaydı tamamlandıktan sonra açılır. Bu uç, muhasebe
  * kullanıcısının "Arşive Taşı" aksiyonuyla çağrılır.
  *
  * POST JSON: { docId }

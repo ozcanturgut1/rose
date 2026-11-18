@@ -3,7 +3,8 @@
  *
  * Dövizli faturalarda TL toplamları UBL AdditionalDocumentReference alanlarından okunur
  * (LINEEXTENSIONAMOUNT, PAYABLEAMOUNT, KDV vb.) — XSLT/PDF ile aynı kaynak.
- * Kalem TL tutarları bu toplamlara, kalem döviz tutarı oranında dağıtılır.
+ * Dövizli kalemin TL tutarı kalem döviz tutarı × kurdur; toplamla aradaki kuruş farkı
+ * döviz tutarı en büyük kaleme yazılır. TL faturada kalemler toplama oranla dağıtılır.
  */
 import { roundMoney } from "./tevkifatMuhasebe.js";
 
@@ -140,6 +141,30 @@ export function allocateProportionalTl(perLine, targetTl, docKey, tlKey) {
   return perLine;
 }
 
+/**
+ * Dövizli kalem TL'si: her kalem kendi döviz tutarı × kur. Hedef toplamla aradaki
+ * kuruş farkı döviz tutarı en büyük kaleme yazılır. Döviz tutarı olan kalem yoksa
+ * hiçbir kaleme yazmaz.
+ */
+export function allocateByRateTl(perLine, targetTl, docKey, tlKey, kur) {
+  if (!Array.isArray(perLine) || !perLine.length) return perLine;
+  const target = roundMoney(targetTl);
+  const k = Number(kur);
+  if (target <= 0 || !Number.isFinite(k) || k <= 0) return perLine;
+
+  let toplam = 0;
+  let enBuyuk = -1;
+  for (let i = 0; i < perLine.length; i++) {
+    const doc = Number(perLine[i][docKey]) || 0;
+    perLine[i][tlKey] = doc > 0 ? roundMoney(doc * k) : 0;
+    toplam = roundMoney(toplam + perLine[i][tlKey]);
+    if (doc > 0 && (enBuyuk < 0 || doc > Number(perLine[enBuyuk][docKey]))) enBuyuk = i;
+  }
+  if (enBuyuk < 0) return perLine;
+  perLine[enBuyuk][tlKey] = roundMoney(perLine[enBuyuk][tlKey] + target - toplam);
+  return perLine;
+}
+
 /** Belge döviz tutarını TL'ye çevirir (UBL TL toplamı yoksa yedek). */
 export function docAmountToTl(docAmount, isForeignCurrency, kur) {
   const n = Number(docAmount);
@@ -219,9 +244,22 @@ export function computeUblExactAmounts(p) {
     odenecekTutar = roundMoney(docPayable);
     if (odenecekTutar <= 0) odenecekTutar = roundMoney(malHizmetToplamTutari + vergiTutari);
   }
+  // Ayrı yuvarlanan TL ödenecek, matrah + KDV'den kuruş sapar; cari ile muhasebe ayrışır.
+  // Tevkifat gibi döviz ödenecek tutarın matrah + KDV olmadığı belgeler bu kurala girmez.
+  if (isForeignCurrency && Math.abs(docPayable - (docMal + docKdv)) < 0.005) {
+    odenecekTutar = roundMoney(malHizmetToplamTutari + vergiTutari);
+  }
 
-  allocateProportionalTl(perLine, malHizmetToplamTutari, "docNet", "netTl");
-  allocateProportionalTl(perLine, vergiTutari, "docTax", "taxTl");
+  if (isForeignCurrency) {
+    allocateByRateTl(perLine, malHizmetToplamTutari, "docNet", "netTl", kur);
+    allocateByRateTl(perLine, vergiTutari, "docTax", "taxTl", kur);
+  } else {
+    allocateProportionalTl(perLine, malHizmetToplamTutari, "docNet", "netTl");
+    allocateProportionalTl(perLine, vergiTutari, "docTax", "taxTl");
+  }
+  if (vergiTutari > 0 && perLine.every((row) => !(Number(row.taxTl) > 0))) {
+    allocateProportionalTl(perLine, vergiTutari, "docNet", "taxTl");
+  }
 
   for (const row of perLine) {
     row.unitPrice = row.qty > 0 ? roundMoney(row.netTl / row.qty) : roundMoney(row.netTl);

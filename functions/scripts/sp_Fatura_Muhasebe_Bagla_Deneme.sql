@@ -2,6 +2,8 @@
    Kurulum patchSpFaturaMuhasebeBaglaTevkifat.js ile yapilmalidir; script yer tutucuyu
    DB_READ_NAME ile degistirir. */
 CREATE PROCEDURE dbo.sp_Fatura_Muhasebe_Bagla_Deneme
+  /* GIDER_KALEM_BAZLI: GİDER (9) fişi ALIM gibi kalem bazlı kurulur. etaInvoiceSync.js
+     bu işaret yoksa faturayı GİDER'e çevirmez. */
   @FatFisRefNo INT,
   @MuhFisRefNo INT OUTPUT,
   @RefFatFisRefNo INT = NULL
@@ -264,12 +266,12 @@ BEGIN
   IF @AccTev360 IS NULL
     SET @AccTev360 = '360 01 02';
 
-  /* --- Referans fatura (ALIM hariç): tevkifatlı ise hesap kodları korunur ---
+  /* --- Referans fatura (ALIM ve GİDER hariç): tevkifatlı ise hesap kodları korunur ---
      @RefFatFisRefNo, JS tarafında findStockCodeBySupplierHistory ile okuma DB'sinden
      (DB_READ_NAME) çözülen bir FATFIS refno'sudur; bu yüzden referans satırları da
      aynı DB'den okunmalıdır. {{REF_DB}} yer tutucusu kurulum sırasında
      patchSpFaturaMuhasebeBaglaTevkifat.js tarafından DB_READ_NAME ile değiştirilir. */
-  IF @RefFatFisRefNo IS NOT NULL AND @RefFatFisRefNo > 0 AND @FatTip <> 1
+  IF @RefFatFisRefNo IS NOT NULL AND @RefFatFisRefNo > 0 AND @FatTip NOT IN (1, 9)
   BEGIN
     DECLARE @RefMuh INT = (
       SELECT TOP 1 ISNULL(FATFISMUHREFNO, 0)
@@ -638,14 +640,16 @@ BEGIN
 
   IF @isAlisLike = 1
   BEGIN
-    IF @FatTip = 1
+    IF @FatTip IN (1, 9)
     BEGIN
-      /* ALIM (FATFISTIPI=1): referans olsa da kalem bazlı STKMUHBAGLANTI */
+      /* ALIM (1) ve GİDER (9): referans olsa da kalem bazlı. Hizmet satırının hesabı
+         hizmet kartındadır (HIZMET.HIZMUHKOD); STKMUHBAGLANTI'de hizmet kodu yoktur. */
       DECLARE
         @LnSira INT,
         @LnStk VARCHAR(40),
         @LnAcik VARCHAR(120),
         @LnMal DECIMAL(28, 9),
+        @LnKodTip INT,
         @LnAccMal VARCHAR(40),
         @MuhSira INT = 0;
 
@@ -657,23 +661,30 @@ BEGIN
             NULLIF(LTRIM(RTRIM(H.FATHARACIKLAMA)), ''),
             ISNULL(NULLIF(LTRIM(RTRIM(H.FATHARSTKCINS)), ''), @EvrakNo)
           ),
-          ROUND(ISNULL(H.FATHARNETTUTAR, ISNULL(H.FATHARKDVMATRAH, H.FATHARTUTAR)), 2)
+          ROUND(ISNULL(H.FATHARNETTUTAR, ISNULL(H.FATHARKDVMATRAH, H.FATHARTUTAR)), 2),
+          ISNULL(H.FATHARKODTIP, 1)
         FROM dbo.FATHAR H WITH (NOLOCK)
         WHERE H.FATHARREFNO = @FatFisRefNo
           AND ISNULL(NULLIF(LTRIM(RTRIM(H.FATHARSTKKOD)), ''), '') <> ''
         ORDER BY H.FATHARSIRANO;
 
       OPEN curFathar;
-      FETCH NEXT FROM curFathar INTO @LnSira, @LnStk, @LnAcik, @LnMal;
+      FETCH NEXT FROM curFathar INTO @LnSira, @LnStk, @LnAcik, @LnMal, @LnKodTip;
       WHILE @@FETCH_STATUS = 0
       BEGIN
         SET @LnAccMal = NULL;
 
-        SELECT TOP 1 @LnAccMal = NULLIF(LTRIM(RTRIM(B.SMBMUHKOD1)), '')
-        FROM dbo.STKMUHBAGLANTI B WITH (NOLOCK)
-        WHERE B.SMBSTKKOD = @LnStk
-          AND B.SMBFTNO = @FatTip
-          AND ISNULL(NULLIF(LTRIM(RTRIM(B.SMBMUHKOD1)), ''), '') <> '';
+        IF @LnKodTip = 2
+          SELECT TOP 1 @LnAccMal = NULLIF(LTRIM(RTRIM(Z.HIZMUHKOD)), '')
+          FROM dbo.HIZMET Z WITH (NOLOCK)
+          WHERE Z.HIZKOD = @LnStk;
+
+        IF @LnAccMal IS NULL
+          SELECT TOP 1 @LnAccMal = NULLIF(LTRIM(RTRIM(B.SMBMUHKOD1)), '')
+          FROM dbo.STKMUHBAGLANTI B WITH (NOLOCK)
+          WHERE B.SMBSTKKOD = @LnStk
+            AND B.SMBFTNO = @FatTip
+            AND ISNULL(NULLIF(LTRIM(RTRIM(B.SMBMUHKOD1)), ''), '') <> '';
 
         IF @LnAccMal IS NULL
           SELECT TOP 1 @LnAccMal = NULLIF(LTRIM(RTRIM(B.SMBMUHKOD1)), '')
@@ -717,7 +728,7 @@ BEGIN
           );
         END;
 
-        FETCH NEXT FROM curFathar INTO @LnSira, @LnStk, @LnAcik, @LnMal;
+        FETCH NEXT FROM curFathar INTO @LnSira, @LnStk, @LnAcik, @LnMal, @LnKodTip;
       END;
       CLOSE curFathar;
       DEALLOCATE curFathar;
@@ -813,7 +824,7 @@ BEGIN
     END
     ELSE
     BEGIN
-      /* Diğer alış benzeri tipler (8,9,11 vb.): tek mal satırı */
+      /* Diğer alış benzeri tipler (8, 11 vb.): tek mal satırı */
       INSERT INTO dbo.MUHHAR (
         MUHHARTAR, MUHHARREFNO, MUHHARSIRANO, MUHHARMUHKOD, MUHHARTUTAR, MUHHARBATIPI,
         MUHHAREVRAKNO, MUHHARACIKLAMA, MUHHARKAYITONC, MUHHARKAYNAK, MUHHARBELTUR, MUHHARCINSI, MUHHARYEVNO

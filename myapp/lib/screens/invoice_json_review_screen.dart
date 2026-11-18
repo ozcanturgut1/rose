@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../formatting/display_date.dart';
@@ -2505,7 +2506,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
     try {
       final kalemState = _kalemAciklamaPanelKey.currentState;
       if (kalemState != null) {
-        final kalemOk = await kalemState.saveAllPending();
+        final kalemOk = await kalemState.saveAllPending(redAciklamasi: decision == 'reddedildi');
         if (!kalemOk) {
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
@@ -3536,9 +3537,13 @@ class _KalemKullaniciAciklamaPanelState extends State<_KalemKullaniciAciklamaPan
     return '';
   }
 
+  /// ETA kaydı iplik biriminin notunu stok cinsine ekler; yazar bu alandan bulunur.
+  String get _yazanUid => FirebaseAuth.instance.currentUser?.uid ?? '';
+
   /// Firestore güncellemesi için değişen kalemler (tek update).
-  Map<String, dynamic> _buildPendingKalemPatch() {
+  Map<String, dynamic> _buildPendingKalemPatch({bool redAciklamasi = false}) {
     final patch = <String, dynamic>{};
+    final yazanUid = _yazanUid;
     for (var i = 0; i < _keys.length; i++) {
       final key = _keys[i];
       final aciklama = _controllers[key]!.text.trim();
@@ -3551,6 +3556,8 @@ class _KalemKullaniciAciklamaPanelState extends State<_KalemKullaniciAciklamaPan
           'etiket': _etiketler[i],
           'aciklama': aciklama,
           'guncelleme': FieldValue.serverTimestamp(),
+          if (yazanUid.isNotEmpty) 'yazanUid': yazanUid,
+          if (redAciklamasi) 'redAciklamasi': true,
         };
       }
     }
@@ -3558,9 +3565,10 @@ class _KalemKullaniciAciklamaPanelState extends State<_KalemKullaniciAciklamaPan
   }
 
   /// Onaya Sun / Onayla / Reddet öncesi: kaydedilmemiş tüm kalem notlarını yazar.
-  Future<bool> saveAllPending() async {
+  /// Reddetme sırasında yazılan not fişe taşınmasın diye işaretlenir.
+  Future<bool> saveAllPending({bool redAciklamasi = false}) async {
     if (_savingAll) return false;
-    final patch = _buildPendingKalemPatch();
+    final patch = _buildPendingKalemPatch(redAciklamasi: redAciklamasi);
     if (patch.isEmpty) return true;
 
     setState(() => _savingAll = true);
@@ -3587,6 +3595,7 @@ class _KalemKullaniciAciklamaPanelState extends State<_KalemKullaniciAciklamaPan
           'kalemKullaniciAciklamalari.$key': FieldValue.delete(),
         });
       } else {
+        final yazanUid = _yazanUid;
         await ref.set(
           {
             'kalemKullaniciAciklamalari': {
@@ -3594,6 +3603,7 @@ class _KalemKullaniciAciklamaPanelState extends State<_KalemKullaniciAciklamaPan
                 'etiket': etiket,
                 'aciklama': aciklama,
                 'guncelleme': FieldValue.serverTimestamp(),
+                if (yazanUid.isNotEmpty) 'yazanUid': yazanUid,
               },
             },
           },

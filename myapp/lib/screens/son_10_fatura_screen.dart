@@ -28,11 +28,15 @@ import 'invoice_pdf_review_screen.dart';
 ///   manuel yöneltilen faturaları görür.
 ///   `suppliers/sinan` ve `suppliers/yasin` içindeki VKN’ye ait, durumu boş
 ///   faturalar portaldan doğrudan ilgili ekrana düşer.
-/// - `muhasebe` → açılır liste: arşiv bekliyor / onaylandı / reddedildi / onay bekliyor (Ara+Nihai kuyrukları).
+/// - `muhasebe` → açılır liste: arşiv bekliyor / onaylandı / reddedildi / onay bekliyor (Ara+Nihai kuyrukları)
+///   / kaydedilebilir.
 ///   Onay bekliyor satırında parantez, faturanın o an durduğu ekranın birimini gösterir.
+///   Kaydedilebilir: Yasin veya Sinan'ın ekranında olup ETA kaydı tamamlanmamış faturalar;
+///   parantez faturayı gören ekranın birimidir.
 ///
-/// **Arşiv bekliyor**: nihai onay sonrası ETA fatura kaydı tamamlanmış, ancak fatura ve
-/// irsaliyeleri henüz arşive taşınmamış kayıtlar. Muhasebe kaydı kontrol edip
+/// **Arşiv bekliyor**: Yasin veya Sinan onayladıktan (`onaylandı`) ve ETA kaydı
+/// tamamlandıktan sonra. Fatura onların ekranına düşünce kaydedilir; onaylanana
+/// kadar muhasebede onay bekliyor kalır ve arşiv listesine girmez. Muhasebe
 /// **Arşive Taşı** ile [QnbApi.archiveQnbInvoice] çağırır.
 ///
 /// İrsaliyeleri `qnb_docs` önbelleğine almak (yalnız admin UI): **kamyon** ikonu veya
@@ -56,7 +60,7 @@ class Son10FaturaScreen extends StatefulWidget {
 }
 
 /// Muhasebe listesi: Firestore `onayDurumu` veya bekleyen kuyruk görünümü.
-enum _MuhasebeFiltre { arsivBekliyor, onaylandi, reddedildi, onayBekliyor }
+enum _MuhasebeFiltre { arsivBekliyor, onaylandi, reddedildi, onayBekliyor, kaydedilebilir }
 
 /// Onay kuyruğundaki bir faturayı kendi listesinde gören kullanıcı.
 class _OnayEkrani {
@@ -257,10 +261,12 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     return s == 'beklemede_kurfarki' || s == 'beklemede_plaka' || s == 'hata';
   }
 
-  /// ETA fatura kaydı tamamlanmış, muhasebe kontrolü ile arşive taşınmayı bekleyen fatura.
+  /// Onaylanmış ve ETA kaydı bitmiş, muhasebe kontrolü ile arşive taşınmayı bekleyen fatura.
   ///
-  /// `arsivDurumu` alanı yazılmamış eski kayıtlar için `etaKayitDurumu == tamamlandi` yeterlidir.
+  /// Onaydan önceki kayıt (`eta_kayitli`) bu listeye girmez. `arsivDurumu` yazılmamış
+  /// eski onaylı kayıtlar için `etaKayitDurumu == tamamlandi` yeterlidir.
   static bool _arsiveTasinmayiBekliyor(Map<String, dynamic> data) {
+    if (!_onayDurumuIsOnaylandi(data['onayDurumu'])) return false;
     final arsiv = data['arsivDurumu']?.toString().trim().toLowerCase() ?? '';
     if (arsiv == 'arsiv_bekliyor') return true;
     if (arsiv.isNotEmpty) return false;
@@ -402,6 +408,54 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     final etiket = _ekranBirimleri(adlar);
     if (etiket.isEmpty) return '($kuyruk)';
     return '($kuyruk · $etiket)';
+  }
+
+  /// Faturayı kendi nihai listesinde gören Yasin / Sinan ekranlarının birimleri.
+  ///
+  /// `nihai_onay` liste süzmesi ve `functions/nihaiEkranKriteri.js` ile aynı kural
+  /// kalmalı; worker bu ekrandaki faturaları ETA'ya kaydeder.
+  static List<String> _yasinSinanEkranlari(
+    Map<String, dynamic> data, {
+    required List<_OnayEkrani> ekranlar,
+    required Map<String, Set<String>> vknByBirim,
+    required Map<String, String> plakaYeri,
+  }) {
+    final onay = data['onayDurumu']?.toString().trim() ?? '';
+    final nihaiHavuz = _onayDurumuIsNihaiPool(data['onayDurumu']);
+    if (!nihaiHavuz && onay.isNotEmpty) return const [];
+    final hedefUid = (data['nihaiOnayAtananUid']?.toString() ?? '').trim();
+    final assigned = (data['araOnayAtananUid']?.toString() ?? '').trim();
+    final yonlendiren = (data['araOnayYonlendirenUid']?.toString() ?? '').trim();
+    final vkn = _invoiceSupplierVknDigits(data);
+    String? subeOnbellek;
+    final out = <String>[];
+    for (final e in ekranlar) {
+      if (e.rol != 'nihai_onay') continue;
+      final birimNorm = _normBirim(e.birim);
+      if (birimNorm != 'yasin' && birimNorm != 'sinan') continue;
+      if (nihaiHavuz) {
+        final gorur = birimNorm == 'sinan'
+            ? hedefUid == e.uid
+            : hedefUid.isEmpty || hedefUid == e.uid;
+        if (gorur) out.add(e.birim);
+        continue;
+      }
+      final allowed = vknByBirim[e.birim] ?? const <String>{};
+      if (allowed.isEmpty || vkn == null || !allowed.contains(vkn)) continue;
+      final sube = subeOnbellek ??= _hedefSubeBirimi(
+        data,
+        ekranlar: ekranlar,
+        vknByBirim: vknByBirim,
+        plakaYeri: plakaYeri,
+      );
+      if (sube.isNotEmpty && yonlendiren.isEmpty) {
+        if (birimNorm != sube) continue;
+      } else if (assigned.isNotEmpty && assigned != e.uid) {
+        continue;
+      }
+      out.add(e.birim);
+    }
+    return out;
   }
 
   static String _sortKeyFromListItem(Map<String, dynamic> it) {
@@ -661,8 +715,9 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
   /// Firestore — tarih süzmesi yok; şarta uyan tüm `invoice_*` faturalar.
   ///
   /// **nihai / muhasebe (onaylandı|reddedildi):** `onayDurumu` eşitliği + `orderBy(__name__)` (bileşik indeks gerekebilir).
-  /// **muhasebe · arşiv bekliyor:** yalnızca `arsivDurumu == arsiv_bekliyor`. Tüm onaylı faturalar indirilmez.
+  /// **muhasebe · arşiv bekliyor:** `arsivDurumu == arsiv_bekliyor` ve `onayDurumu == onaylandı`.
   /// **muhasebe · onay bekliyor:** Ara (boş `onayDurumu`) + Nihai (`onaya sunuldu`) birleşik liste.
+  /// **muhasebe · kaydedilebilir:** Yasin veya Sinan'ın ekranında, `etaKayitDurumu != tamamlandi`.
   /// **ara:** Koleksiyonun tamamı taranır.
   Future<List<Map<String, dynamic>>> _fetchInvoicesFromFirestoreOnly() async {
     final col = FirebaseFirestore.instance.collection('qnb_invoices');
@@ -680,7 +735,8 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
         : null;
     final subeGerekli = mode == 'ara_onay' ||
         mode == 'nihai_onay' ||
-        (mode == 'muhasebe' && _muhasebeFiltre == _MuhasebeFiltre.onayBekliyor);
+        (mode == 'muhasebe' && _muhasebeFiltre == _MuhasebeFiltre.onayBekliyor) ||
+        (mode == 'muhasebe' && _muhasebeFiltre == _MuhasebeFiltre.kaydedilebilir);
     final ekranBaglam = subeGerekli ? await _loadOnayEkranlari() : null;
     if (mode == 'muhasebe' && _muhasebeFiltre == _MuhasebeFiltre.onayBekliyor) {
       final araDocs = await _paginateByDocId(
@@ -725,6 +781,37 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
           vknByBirim: ekranBaglam.vknByBirim,
           plakaYeri: ekranBaglam.plakaYeri,
         );
+        out.add(item);
+      }
+      out.sort((x, y) => _sortKeyFromListItem(y).compareTo(_sortKeyFromListItem(x)));
+      return out;
+    }
+    if (mode == 'muhasebe' && _muhasebeFiltre == _MuhasebeFiltre.kaydedilebilir) {
+      final docs = await _paginateByDocId(
+        () => col.orderBy(FieldPath.documentId),
+      );
+      final out = <Map<String, dynamic>>[];
+      for (final d in docs) {
+        if (!d.id.startsWith('invoice_')) continue;
+        final data = d.data();
+        final eta = data['etaKayitDurumu']
+                ?.toString()
+                .trim()
+                .toLowerCase()
+                .replaceAll('ı', 'i') ??
+            '';
+        if (eta == 'tamamlandi') continue;
+        final ekranAdlari = _yasinSinanEkranlari(
+          data,
+          ekranlar: ekranBaglam!.ekranlar,
+          vknByBirim: ekranBaglam.vknByBirim,
+          plakaYeri: ekranBaglam.plakaYeri,
+        );
+        if (ekranAdlari.isEmpty) continue;
+        final item = _invoiceDocToListItem(data);
+        item['invoiceDocId'] = d.id;
+        item['araOnayAtananUid'] = data['araOnayAtananUid']?.toString();
+        item['muhasebeBeklemeParantez'] = '(${_ekranBirimleri(ekranAdlari)})';
         out.add(item);
       }
       out.sort((x, y) => _sortKeyFromListItem(y).compareTo(_sortKeyFromListItem(x)));
@@ -1722,6 +1809,10 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
                   DropdownMenuItem(
                     value: _MuhasebeFiltre.onayBekliyor,
                     child: Text('Onay bekliyor'),
+                  ),
+                  DropdownMenuItem(
+                    value: _MuhasebeFiltre.kaydedilebilir,
+                    child: Text('Kaydedilebilir'),
                   ),
                 ],
                 onChanged: (v) {

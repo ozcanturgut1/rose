@@ -1,5 +1,6 @@
 /**
- * Onaylanmış faturaları ETA'ya kaydeden şirket içi worker.
+ * Yasin veya Sinan'ın ekranındaki, ya da onaylanmış faturaları ETA'ya kaydeden şirket içi worker.
+ * Onaylanmamış kayıt arşiv kuyruğunu açmaz.
  *
  *   node scripts/localEtaWorker.js          -> tek parti işleyip çıkar
  *   node scripts/localEtaWorker.js watch    -> sürekli çalışır (servis modu)
@@ -35,6 +36,16 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
 import { syncApprovedInvoiceToEta } from "../etaInvoiceSync.js";
 import { formatEtaError } from "../etaError.js";
 import { evaluateAracPlakaKapisi, recheckPlakaBlokaji } from "../plakaTespit.js";
+import { hedefSubeFromBaglam, loadSubeBaglam } from "../subeAciklamaAtama.js";
+import {
+  ARSIV_BEKLIYOR,
+  ARSIV_ETA_KAYITLI,
+  kaydaUygun,
+  normBirim,
+  onayDurumuBos,
+  vknKaynaklari,
+  yasinVeyaSinanEkraninda,
+} from "../nihaiEkranKriteri.js";
 
 const WORKER_ID = `${os.hostname()}:${process.pid}`;
 // Kilit süresi: bunu aşan 'isleniyor' kayıtları çökmüş bir worker'dan kalmış
@@ -74,13 +85,14 @@ async function writeHeartbeat(db, fields) {
  * (çökmüş worker) devralınır; ETA tarafındaki belge numarası kontrolü
  * (already_exists) ikinci bir güvenlik katmanıdır.
  */
-export async function claimInvoice(db, ref, now) {
+export async function claimInvoice(db, ref, now, ctx) {
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists) return { claimed: false, reason: "not_found" };
     const d = snap.data() || {};
-    if (normalizeStatus(d.onayDurumu) !== "onaylandi") {
-      return { claimed: false, reason: "not_approved" };
+    const sube = ctx && onayDurumuBos(d) ? hedefSubeFromBaglam(d, ctx.baglam) : "";
+    if (!kaydaUygun(d, ctx?.kisiler || [], sube)) {
+      return { claimed: false, reason: "not_eligible" };
     }
     const eta = normalizeStatus(d.etaKayitDurumu);
     if (eta === "tamamlandi") return { claimed: false, reason: "already_done" };
@@ -109,11 +121,14 @@ export async function claimInvoice(db, ref, now) {
   });
 }
 
-async function processDoc(db, docSnap) {
+async function processDoc(db, docSnap, ctx) {
   const docId = docSnap.id;
   const data = docSnap.data() || {};
-  const onay = normalizeStatus(data.onayDurumu);
-  if (onay !== "onaylandi") return { skipped: true, reason: "not_approved" };
+  const sube = ctx && onayDurumuBos(data) ? hedefSubeFromBaglam(data, ctx.baglam) : "";
+  if (!kaydaUygun(data, ctx?.kisiler || [], sube)) {
+    return { skipped: true, reason: "not_eligible" };
+  }
+  const onayBaslangic = normalizeStatus(data.onayDurumu);
 
   const eta = normalizeStatus(data.etaKayitDurumu);
   if (eta === "tamamlandi") return { skipped: true, reason: "already_done" };
@@ -168,7 +183,7 @@ async function processDoc(db, docSnap) {
     return { skipped: false, blocked: true, reason: `plaka_${plakaKapisi.durum}` };
   }
 
-  const claim = await claimInvoice(db, ref, Date.now());
+  const claim = await claimInvoice(db, ref, Date.now(), ctx);
   if (!claim.claimed) {
     if (claim.reason === "baska_isleyicide") {
       console.log(`[SKIP] ${docId}: baska isleyicide (${claim.isleyen || "bilinmiyor"})`);
@@ -180,7 +195,11 @@ async function processDoc(db, docSnap) {
   }
 
   try {
-    const result = await syncApprovedInvoiceToEta(data, docId);
+    const result = await syncApprovedInvoiceToEta(
+      data,
+      docId,
+      onayBaslangic === "onaylandi" ? {} : { allowAutoStk: false }
+    );
     if (result?.blocked) {
       await ref.set(
         {
@@ -200,32 +219,42 @@ async function processDoc(db, docSnap) {
       );
       return { skipped: false, blocked: true, reason: result.blockReason };
     }
-    await ref.set(
-      {
-        etaKayitDurumu: "tamamlandi",
-        etaKayitGuncellemeTarihi: FieldValue.serverTimestamp(),
-        etaIslemKilitBitisMs: 0,
-        etaFatFisRefNo: result.fatFisRefNo || null,
-        etaStokFisRefNo: result.stokFisRefNo || null,
-        etaMuhFisRefNo: result.muhFisRefNo || null,
-        // Muhasebe arşive taşımadan önce mahsup fişini bu alandan görür.
-        muhasebeFisi: result.muhasebeFisi || null,
-        etaKayitDetay: {
-          status: result.status || "ok",
-          lineCount: result.lineCount || 0,
-          localWorker: true,
-          muhasebeRefFatFisRefNo: result.muhasebeRefFatFisRefNo || 0,
-          lineMatches: Array.isArray(result.lineMatches) ? result.lineMatches : [],
-        },
-        etaKayitHata: FieldValue.delete(),
-        // Arşivleme otomatik değil: muhasebe kaydı kontrol edip "Arşive Taşı" ile tetikler.
-        arsivDurumu: "arsiv_bekliyor",
-        arsivBekliyorTarihi: FieldValue.serverTimestamp(),
+    const taze = await ref.get();
+    const tazeData = taze.data() || {};
+    const onaySimdi = normalizeStatus(tazeData.onayDurumu);
+    const arsivSimdi = String(tazeData.arsivDurumu || "").trim();
+    /** @type {Record<string, unknown>} */
+    const patch = {
+      etaKayitDurumu: "tamamlandi",
+      etaKayitGuncellemeTarihi: FieldValue.serverTimestamp(),
+      etaIslemKilitBitisMs: 0,
+      etaFatFisRefNo: result.fatFisRefNo || null,
+      etaStokFisRefNo: result.stokFisRefNo || null,
+      etaMuhFisRefNo: result.muhFisRefNo || null,
+      // Muhasebe arşive taşımadan önce mahsup fişini bu alandan görür.
+      muhasebeFisi: result.muhasebeFisi || null,
+      etaKayitDetay: {
+        status: result.status || "ok",
+        lineCount: result.lineCount || 0,
+        localWorker: true,
+        muhasebeRefFatFisRefNo: result.muhasebeRefFatFisRefNo || 0,
+        lineMatches: Array.isArray(result.lineMatches) ? result.lineMatches : [],
       },
-      { merge: true }
-    );
+      etaKayitHata: FieldValue.delete(),
+    };
+    // Arşiv, Yasin veya Sinan onaylamadan açılmaz. Onay kayıt sırasında gelmişse
+    // kuyruk hemen açılır; yoksa eta_kayitli kalır ve sonraki turda açılır.
+    if (arsivSimdi !== "arsivlendi" && arsivSimdi !== ARSIV_BEKLIYOR) {
+      if (onaySimdi === "onaylandi") {
+        patch.arsivDurumu = ARSIV_BEKLIYOR;
+        patch.arsivBekliyorTarihi = FieldValue.serverTimestamp();
+      } else {
+        patch.arsivDurumu = ARSIV_ETA_KAYITLI;
+      }
+    }
+    await ref.set(patch, { merge: true });
 
-    return { skipped: false, result };
+    return { skipped: false, result, arsivDurumu: patch.arsivDurumu || arsivSimdi };
   } catch (err) {
     const msg = formatEtaError(err);
     await ref.set(
@@ -260,50 +289,153 @@ function plakaBlokajiYenidenDenenebilir(data) {
   return Array.isArray(plakalar) && plakalar.length > 0;
 }
 
+function rolNorm(raw) {
+  return String(raw || "").trim().toLowerCase().replace(/\s+/g, "_");
+}
+
+/** Nihai onay rolü ve birimi Yasin veya Sinan olan profiller. */
+export async function loadNihaiKisiler(db) {
+  const prof = await db.collection("user_profiles").get();
+  const kisiler = [];
+  for (const d of prof.docs) {
+    const x = d.data() || {};
+    const birimNorm = normBirim(x.birim);
+    if (rolNorm(x.role) !== "nihai_onay") continue;
+    if (birimNorm !== "yasin" && birimNorm !== "sinan") continue;
+    const birim = String(x.birim || "").trim();
+    let vkns = new Set();
+    let sorgular = new Set();
+    if (birim) {
+      const s = await db.collection("suppliers").doc(birim).get();
+      if (s.exists) {
+        const parsed = vknKaynaklari(s.data() || {});
+        vkns = parsed.digits;
+        sorgular = parsed.sorgular;
+      }
+    }
+    kisiler.push({ uid: d.id, birimNorm, vkns, sorgular });
+  }
+  return kisiler;
+}
+
+function etaIslenebilir(veri) {
+  const durum = normalizeStatus(veri?.etaKayitDurumu);
+  if (ISLENMEYECEK_DURUMLAR.has(durum)) return false;
+  if (durum === "beklemede_plaka" && !plakaBlokajiYenidenDenenebilir(veri)) return false;
+  return true;
+}
+
+function parcala(list, n) {
+  const out = [];
+  for (let i = 0; i < list.length; i += n) out.push(list.slice(i, i + n));
+  return out;
+}
+
 /**
- * İşlenmeyi bekleyen onaylı faturaları toplar.
- *
- * Sorgu `etaKayitDurumu` üzerinden daraltılamıyor: alan yalnızca onaydan sonra
- * yazıldığı için hiç işlenmemiş faturada mevcut değil ve Firestore'da alanı
- * olmayan doküman o alana konan hiçbir filtreye girmez — yani tam da işlenmesi
- * gereken faturalar elenirdi. Bunun yerine imleçle sayfalayıp bellekte eliyoruz;
- * böylece sabit bir pencere yüzünden yeni fatura gözden kaçmıyor.
+ * Onaylanmış fatura arşiv kuyruğuna alınmamışsa alır.
+ * Erken kayıt `eta_kayitli` bırakır; onay düşünce bu tur açar. SQL yazmaz.
  */
-export async function collectPendingDocs(col, limit, sayfaBoyutu = 200) {
+async function acArsivKuyrugu(db) {
+  const snap = await db
+    .collection("qnb_invoices")
+    .where("arsivDurumu", "==", ARSIV_ETA_KAYITLI)
+    .limit(50)
+    .get();
+  let acilan = 0;
+  for (const d of snap.docs) {
+    const veri = d.data() || {};
+    if (normalizeStatus(veri.onayDurumu) !== "onaylandi") continue;
+    if (normalizeStatus(veri.etaKayitDurumu) !== "tamamlandi") continue;
+    await d.ref.set(
+      {
+        arsivDurumu: ARSIV_BEKLIYOR,
+        arsivBekliyorTarihi: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+    acilan++;
+    console.log(`[ARSIV] ${d.id}: onaylandi, arsiv kuyrugu acildi`);
+  }
+  return acilan;
+}
+
+/**
+ * İşlenmeyi bekleyen faturaları toplar.
+ *
+ * İki kapı vardır: onaylanmış faturalar ve Yasin veya Sinan'ın ekranındakiler.
+ * `etaKayitDurumu` üzerinden daraltılamıyor: alan hiç işlenmemiş faturada
+ * yoktur ve Firestore'da alanı olmayan doküman o filtreye girmez.
+ */
+export async function collectPendingDocs(col, limit, sayfaBoyutu = 200, ctx = null) {
   const statuses = ["onaylandı", "onaylandi"];
   const maxTarama = Number(process.env.ETA_LOCAL_MAX_SCAN || "2000");
   const docs = new Map();
   let scanned = 0;
   let taramaSiniriAsildi = false;
+  const kisiler = ctx?.kisiler || [];
+  const baglam = ctx?.baglam;
 
-  for (const s of statuses) {
+  // Onaylı birikinti ekran taramasının hakkını yemesin diye iki kapının sayacı ayrıdır.
+  async function sayfala(qBase, kabul, butce) {
     let cursor = null;
-    while (docs.size < limit && scanned < maxTarama) {
-      let q = col
-        .where("type", "==", "invoice")
-        .where("onayDurumu", "==", s)
-        .limit(sayfaBoyutu);
+    while (docs.size < limit && butce.n < maxTarama) {
+      let q = qBase.limit(sayfaBoyutu);
       if (cursor) q = q.startAfter(cursor);
       const snap = await q.get();
       if (snap.empty) break;
       scanned += snap.size;
+      butce.n += snap.size;
       for (const d of snap.docs) {
-        const veri = d.data();
-        const durum = normalizeStatus(veri?.etaKayitDurumu);
-        if (ISLENMEYECEK_DURUMLAR.has(durum)) continue;
-        if (durum === "beklemede_plaka" && !plakaBlokajiYenidenDenenebilir(veri)) continue;
+        const veri = d.data() || {};
+        if (String(veri.type || "").toLowerCase() !== "invoice") continue;
+        if (!etaIslenebilir(veri)) continue;
+        if (kabul && !(await kabul(veri))) continue;
         docs.set(d.id, d);
         if (docs.size >= limit) break;
       }
-      if (snap.size < sayfaBoyutu) break;
+      if (snap.size < sayfaBoyutu || butce.n >= maxTarama) break;
       cursor = snap.docs[snap.docs.length - 1];
     }
-    if (scanned >= maxTarama) taramaSiniriAsildi = true;
+    if (butce.n >= maxTarama) taramaSiniriAsildi = true;
+  }
+
+  const onayButce = { n: 0 };
+  for (const s of statuses) {
+    await sayfala(col.where("type", "==", "invoice").where("onayDurumu", "==", s), null, onayButce);
+  }
+
+  if (kisiler.length && baglam) {
+    const ekranButce = { n: 0 };
+    const ekranda = async (veri) => {
+      const sube = onayDurumuBos(veri) ? hedefSubeFromBaglam(veri, baglam) : "";
+      if (normalizeStatus(veri.onayDurumu) === "onaylandi") return false;
+      return yasinVeyaSinanEkraninda(veri, kisiler, sube);
+    };
+    await sayfala(
+      col.where("type", "==", "invoice").where("onayDurumu", "==", "onaya sunuldu"),
+      ekranda,
+      ekranButce
+    );
+    for (const kisi of kisiler) {
+      if (!kisi.uid || docs.size >= limit) continue;
+      await sayfala(col.where("araOnayAtananUid", "==", kisi.uid), ekranda, ekranButce);
+    }
+    const sorgular = new Set();
+    for (const kisi of kisiler) {
+      for (const v of kisi.sorgular || []) sorgular.add(v);
+    }
+    // Portaldan alınan faturada `supplierVkn` yazılmıyor; VKN yalnız `qnbRaw.gondericiVkn` içinde.
+    for (const alan of ["supplierVkn", "qnbRaw.gondericiVkn"]) {
+      for (const parca of parcala([...sorgular], 30)) {
+        if (!parca.length || docs.size >= limit) break;
+        await sayfala(col.where(alan, "in", parca), ekranda, ekranButce);
+      }
+    }
   }
 
   if (taramaSiniriAsildi) {
     console.warn(
-      `[WARN] tarama siniri asildi (${maxTarama}): onayli-arsivlenmemis fatura birikmis olabilir, arsivlemeyi kontrol edin.`
+      `[WARN] tarama siniri asildi (${maxTarama}): kayda uygun fatura birikmis olabilir.`
     );
   }
   return { docs, scanned, taramaSiniriAsildi };
@@ -313,10 +445,19 @@ async function runBatch(batchLimit) {
   ensureAdmin();
   const db = getFirestore();
   const basladi = Date.now();
+  const kisiler = await loadNihaiKisiler(db);
+  const baglam = await loadSubeBaglam(db);
+  const ctx = { kisiler, baglam };
+  if (!kisiler.length) {
+    console.warn("[WARN] Yasin/Sinan nihai profili bulunamadi; kayit yalnizca onaylanmis faturalarda.");
+  }
+  const arsivAcilan = await acArsivKuyrugu(db);
 
   const { docs, scanned } = await collectPendingDocs(
     db.collection("qnb_invoices"),
-    batchLimit
+    batchLimit,
+    200,
+    ctx
   );
 
   let ok = 0;
@@ -324,7 +465,7 @@ async function runBatch(batchLimit) {
   let skipped = 0;
   let blocked = 0;
   for (const d of docs.values()) {
-    const r = await processDoc(db, d);
+    const r = await processDoc(db, d, ctx);
     if (r.skipped) {
       skipped++;
       continue;
@@ -337,7 +478,7 @@ async function runBatch(batchLimit) {
       console.log(`[BLOCKED] ${d.id}: ${r.reason}`);
     } else {
       ok++;
-      console.log(`[OK] ${d.id}: ${JSON.stringify(r.result)}`);
+      console.log(`[OK] ${d.id}: arsiv=${r.arsivDurumu || "-"} ${JSON.stringify(r.result)}`);
     }
   }
   const ozet = {
@@ -347,10 +488,11 @@ async function runBatch(batchLimit) {
     blocked,
     error: err,
     skipped,
+    arsivAcilan,
     elapsedMs: Date.now() - basladi,
   };
   console.log(
-    `Batch done. scanned=${scanned} total=${ozet.total} ok=${ok} blocked=${blocked} error=${err} skipped=${skipped}`
+    `Batch done. scanned=${scanned} total=${ozet.total} ok=${ok} blocked=${blocked} error=${err} skipped=${skipped} arsivAcilan=${arsivAcilan}`
   );
   return ozet;
 }

@@ -171,9 +171,24 @@ function genelHedef(vkn, data, subeByBirim, birimlerByVkn) {
 }
 
 /**
- * @returns {Promise<string>} hedef birim veya boş (kural yok / plaka ayrılmadı)
+ * Şube kararı için profiller, tedarikçi VKN listeleri ve plaka yerleri.
+ * Aynı turda çok fatura bakılırken koleksiyonlar bir kez okunur.
  */
-export async function hedefSubeBirimi(db, data) {
+export async function loadSubeBaglam(db) {
+  const [arac, subeByBirim, birimlerByVkn] = await Promise.all([
+    aracHaritasi(db),
+    birimSubeleri(db),
+    vknBirimleri(db),
+  ]);
+  return { arac, subeByBirim, birimlerByVkn };
+}
+
+/**
+ * Dart liste süzmesindeki `_hedefSubeBirimi` ile aynı sonuç.
+ * Genel kuralda dönen birim, profildeki yazıldığı biçimdedir (normalize edilmez).
+ * @returns {string} hedef birim veya boş (kural yok / plaka ayrılmadı)
+ */
+export function hedefSubeFromBaglam(data, baglam) {
   const vkn = vknOf(data);
   if (!vkn) return "";
   if (vkn === NEGO_VKN) return fabrikaIsareti(notMetni(data), false) ? "elif" : "yasin";
@@ -186,13 +201,20 @@ export async function hedefSubeBirimi(db, data) {
   if (vkn === OLUKLU_VKN) return fabrikaIsareti(kalemMetni(data), false) ? "ayse" : "iplik";
   if (vkn === ILERI_VKN) return fabrikaIsareti(notMetni(data), false) ? "ayse" : "iplik";
   if (vkn === KAZIM_VKN) {
-    const yer = plakaYeri(data, await aracHaritasi(db));
+    const yer = plakaYeri(data, baglam.arac);
     if (yer === "fabrika") return "ayse";
     if (yer === "merkez") return "iplik";
     if (yer === "giyim") return "giyim";
     return "";
   }
-  return genelHedef(vkn, data, await birimSubeleri(db), await vknBirimleri(db));
+  return genelHedef(vkn, data, baglam.subeByBirim, baglam.birimlerByVkn);
+}
+
+/**
+ * @returns {Promise<string>} hedef birim veya boş (kural yok / plaka ayrılmadı)
+ */
+export async function hedefSubeBirimi(db, data) {
+  return hedefSubeFromBaglam(data, await loadSubeBaglam(db));
 }
 
 async function uidByBirim(db, birim) {

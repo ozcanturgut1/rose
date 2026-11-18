@@ -224,18 +224,23 @@ export const updateQnbInvoiceYonetimOnay = onRequest({ region: "europe-west1" },
 
     if (noteRaw) {
       const yazarAd = await yazarGorunenAd(user.uid);
+      const redNotu = onayDurumu === "reddedildi";
       if (noteRole === "ara_onay") {
         patch.onayAciklamaAraOnay = noteRaw;
         patch.onayAciklamaAraOnayYazanAd = yazarAd;
+        patch.onayAciklamaAraOnayReddi = redNotu;
       } else if (noteRole === "nihai_onay") {
         patch.onayAciklamaNihaiOnay = noteRaw;
         patch.onayAciklamaNihaiOnayYazanAd = yazarAd;
+        patch.onayAciklamaNihaiOnayReddi = redNotu;
       } else if (noteRole === "muhasebe") {
         patch.onayAciklamaMuhasebe = noteRaw;
         patch.onayAciklamaMuhasebeYazanAd = yazarAd;
+        patch.onayAciklamaMuhasebeReddi = redNotu;
       } else {
         patch.onayAciklama = noteRaw;
         patch.onayAciklamaYazanAd = yazarAd;
+        patch.onayAciklamaReddi = redNotu;
       }
     }
 
