@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 
@@ -15,6 +16,10 @@ void main() async {
           storageBucket: "curious-nucleus-392008.appspot.com",
 
     )
+  );
+  // ESET SSL taraması açık Firestore kanalını düşürür. Web uzun yoklama kullanır.
+  FirebaseFirestore.instance.settings = const Settings(
+    webExperimentalForceLongPolling: true,
   );
   runApp(MyApp());
 
