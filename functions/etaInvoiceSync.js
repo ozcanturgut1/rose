@@ -14,6 +14,7 @@ import {
   strictLineUnitPriceFromUbl,
 } from "./ublExactAmounts.js";
 import { resolveAmountModel } from "./ublAuthoritativeAmounts.js";
+import { baslikEkleriniSatiraYaz, tutarKapisi, tutarKapisiMesaji } from "./faturaBaslikEkleri.js";
 import {
   loadAracGiderKurallari,
   detectGiderTuru,
@@ -30,6 +31,7 @@ import {
   cariDovizKarti,
   resolveCekSenetKurFarkiStok,
 } from "./cekSenetKurFarki.js";
+import { gecmisKartSonAlimaUygun, sonAlimBirimFiyati } from "./sonAlimFiyati.js";
 
 let readPoolPromise = null;
 let writePoolPromise = null;
@@ -2907,13 +2909,14 @@ export async function previewStockLineMatches(afterData) {
           taxPercent: 0,
         },
       ];
+  if (lines.length) baslikEkleriniSatiraYaz(usableLines, afterData);
 
   const paraBirimiRaw = extractInvoiceCurrency(afterData);
   const isForeignCurrency = !isDomesticTryOrTl(paraBirimiRaw);
 
   const preMatchedHistories = [];
   for (const l of usableLines) {
-    if (!supplierVkn) {
+    if (l.ekUcret || !supplierVkn) {
       preMatchedHistories.push(null);
       continue;
     }
@@ -2960,11 +2963,37 @@ export async function previewStockLineMatches(afterData) {
   const ergulNakliyeStok = await resolveErgulKargoNakliyeStok(wPool, supplierVkn);
   const corluOsbStok = await resolveCorluOsbStok(wPool, supplierVkn, usableLines);
   const zorunluStok = cekSenetStok || ergulNakliyeStok || corluOsbStok;
-  const iadePlan = await resolveIadeReferansPlani(wPool, afterData, usableLines);
+  const iadePlan = await resolveIadeReferansPlani(
+    wPool,
+    afterData,
+    usableLines.filter((l) => !l.ekUcret)
+  );
   const lineMatches = [];
 
   for (let i = 0; i < usableLines.length; i++) {
     const l = usableLines[i];
+    if (l.ekUcret) {
+      const onceki = lineMatches.find((m) => m.source !== "ek_ucret" && m.selectedStkKod);
+      lineMatches.push({
+        lineNo: i + 1,
+        source: "ek_ucret",
+        selectedStkKod: onceki?.selectedStkKod || null,
+        primaryKalemAciklama: l.stokCinsi || null,
+        rawItemCode: null,
+        historyCandidateStk: null,
+        historyScore: null,
+        cinsiMatchMode: null,
+        cinsiMatchScore: null,
+        score: null,
+        scoreBreakdown: null,
+        linePreview: {
+          stokCinsi: l.stokCinsi || null,
+          lineAciklama: l.lineAciklama || null,
+          kullaniciKalemAciklama: null,
+        },
+      });
+      continue;
+    }
     const rawItemCode = String(l.itemCode || "").trim().slice(0, 40);
     let itemCodeResolved = null;
     let matchSource = null;
@@ -3209,6 +3238,9 @@ export async function syncApprovedInvoiceToEta(afterData, docId, opts = {}) {
         },
       ];
   belgeKdvOraniniSatiraYaz(usableLines, afterData);
+  const ekSonuc = lines.length
+    ? baslikEkleriniSatiraYaz(usableLines, afterData)
+    : { uygulandi: false };
 
   const faturaTarihi = parseYmd(q.belgeTarihi || afterData.belgeTarihi);
   const vadeTarihi = q.vadeTarihi ? parseYmd(q.vadeTarihi) : faturaTarihi;
@@ -3225,6 +3257,10 @@ export async function syncApprovedInvoiceToEta(afterData, docId, opts = {}) {
 
   if (amountModel === "ubl") {
     docTotals = buildDocTotalsForAmountModel(afterData, q, usableLines);
+    if (ekSonuc.uygulandi) {
+      docTotals = { ...docTotals, mal: ekSonuc.mal };
+      if (ekSonuc.kdv > 0) docTotals = { ...docTotals, kdv: ekSonuc.kdv };
+    }
     if (cls?.hasTevkifat) {
       const grossKdv = tevkifatToplamKdv(afterData, q, docTotals);
       if (grossKdv > docTotals.kdv + 0.02) docTotals = { ...docTotals, kdv: grossKdv };
@@ -3287,6 +3323,21 @@ export async function syncApprovedInvoiceToEta(afterData, docId, opts = {}) {
   }
   const vergiTutariKayit = kdvSplit ? kdvSplit.toplamKdv : vergiTutari;
   const odenecekTutarKayit = kdvSplit ? kdvSplit.odenecekTutar : odenecekTutar;
+  const kapı = tutarKapisi(aligned.perLine, odenecekTutarKayit, tevkifatTutar);
+  if (!kapı.uyar) {
+    return {
+      status: "blocked_tutar",
+      blocked: true,
+      blockReason: "odenecek_satir_farki",
+      blockMessage: tutarKapisiMesaji(kapı),
+      blockDetail: {
+        odenecek: kapı.odenecek,
+        satirToplam: kapı.satirToplam,
+        fark: kapı.fark,
+      },
+      docId,
+    };
+  }
   const ublOtvTutar = extractOtvFromUbl(afterData);
   let otvTutar = parseNum(q.otvTutari ?? afterData?.otvTutari ?? ublOtvTutar, 0);
   otvTutar = convertDocAmountToTlIfNeeded(otvTutar, {
@@ -3323,7 +3374,7 @@ export async function syncApprovedInvoiceToEta(afterData, docId, opts = {}) {
   // preMatchedHistories[i] sonucunu kullanır.
   const preMatchedHistories = [];
   for (const l of usableLines) {
-    if (!supplierVkn) {
+    if (l.ekUcret || !supplierVkn) {
       preMatchedHistories.push(null);
       continue;
     }
@@ -3409,6 +3460,22 @@ export async function syncApprovedInvoiceToEta(afterData, docId, opts = {}) {
 
   for (let i = 0; i < usableLines.length; i++) {
     const l = usableLines[i];
+    if (l.ekUcret) {
+      const onceki = satirKartlari.find((s) => !s.ekUcret);
+      if (!onceki?.itemCode) {
+        throw new Error("Ek ücret satırı için mal satırının stok kodu yok.");
+      }
+      const itemCode = String(onceki.itemCode).slice(0, 40);
+      lineMatches.push({
+        lineNo: i + 1,
+        source: "ek_ucret",
+        selectedStkKod: itemCode,
+        score: null,
+        scoreBreakdown: null,
+      });
+      satirKartlari.push({ itemCode, hizmetSatiri: onceki.hizmetSatiri, ekUcret: true });
+      continue;
+    }
     const rawItemCode = String(l.itemCode || "").trim().slice(0, 40);
     let itemCodeResolved = null;
     let matchSource = null;
@@ -3988,5 +4055,140 @@ export async function syncApprovedInvoiceToEta(afterData, docId, opts = {}) {
     lineCount: usableLines.length,
     lineMatches,
   };
+}
+
+/**
+ * Fatura kalemlerinin son alım birim fiyatı. Yalnızca okur.
+ * Kart, kayıtta seçilecek stok/hizmet kartıdır. Baskın yedek kart kullanılmaz.
+ * Bu faturanın kendi fişi, evrak numarasıyla dışarıda bırakılır.
+ * @returns {Promise<{ sira: number, fiyat: number, paraBirimi: string }[]>}
+ */
+export async function okuSatirSonAlimFiyatlari(invoiceData) {
+  const data = invoiceData && typeof invoiceData === "object" ? invoiceData : {};
+  const pool = await readPool();
+  const q = data.qnbRaw && typeof data.qnbRaw === "object" ? data.qnbRaw : {};
+  const supplierVkn = String(data.supplierVkn || q.gondericiVkn || q.vknTckn || "").trim();
+  const belgeNo = String(data.belgeNo || q.belgeNo || "").trim();
+  const lines = applyKalemKullaniciAciklamalari(extractInvoiceLines(data), data);
+  if (!lines.length || !supplierVkn) return [];
+
+  const paraBirimi = extractInvoiceCurrency(data);
+  const isForeign = !isDomesticTryOrTl(paraBirimi);
+  const cls = classifyInvoiceType(data);
+  const minScore = parseNum(process.env.ETA_MATCH_MIN_SCORE, 0.28);
+  const cari = await resolveCariKod(pool, supplierVkn, isForeign ? paraBirimi : "", lines);
+  const carkod = String(cari?.carkod || "").trim();
+  if (!carkod) return [];
+
+  const corlu = await resolveCorluOsbStok(pool, supplierVkn, lines);
+  const ergul = corlu ? null : await resolveErgulKargoNakliyeStok(pool, supplierVkn);
+  const zorunluKod = String(corlu?.stkkod || ergul?.stkkod || "").trim();
+
+  /** @type {{ sira: number, kod: string }[]} */
+  const secilen = [];
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (l?.ekUcret) continue;
+    const demirbasKod = String((await resolveKucukDemirbas(pool, l))?.stkkod || "").trim();
+    if (demirbasKod) {
+      secilen.push({ sira: i + 1, kod: demirbasKod });
+      continue;
+    }
+    if (zorunluKod) {
+      secilen.push({ sira: i + 1, kod: zorunluKod });
+      continue;
+    }
+    const history = await findStockCodeBySupplierHistory(pool, {
+      supplierVkn,
+      line: l,
+      invoiceClass: cls,
+      currencyCode: isForeign ? paraBirimi : "",
+    });
+    if (!gecmisKartSonAlimaUygun(history, minScore)) continue;
+    const fam = await preferStockCodeForUserFamilyPrefix(pool, history.stkkod, l);
+    const kod = String(fam?.code || history.stkkod || "").trim();
+    if (!kod) continue;
+    secilen.push({ sira: i + 1, kod });
+  }
+  if (!secilen.length) return [];
+
+  const fiyatlar = await sonAlimFiyatSatirlari(
+    pool,
+    carkod,
+    secilen.map((s) => s.kod),
+    belgeNo
+  );
+  const out = [];
+  for (const s of secilen) {
+    const row = sonAlimSatiriBul(fiyatlar, s.kod);
+    if (!row) continue;
+    const fiyat = sonAlimBirimFiyati(row, paraBirimi);
+    if (!fiyat) continue;
+    out.push({ sira: s.sira, fiyat: fiyat.fiyat, paraBirimi: fiyat.paraBirimi });
+  }
+  return out;
+}
+
+function sonAlimSatiriBul(fiyatlar, kod) {
+  const direkt = fiyatlar.get(kod);
+  if (direkt) return direkt;
+  const aranan = String(kod || "").trim().toUpperCase();
+  if (!aranan) return null;
+  for (const [k, v] of fiyatlar) {
+    if (String(k).trim().toUpperCase() === aranan) return v;
+  }
+  return null;
+}
+
+async function sonAlimFiyatSatirlari(pool, carkod, kodlar, evrakNo) {
+  const uniq = [];
+  const seen = new Set();
+  for (const raw of kodlar) {
+    const k = String(raw || "").trim().slice(0, 40);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    uniq.push(k);
+  }
+  const map = new Map();
+  if (!uniq.length || !carkod) return map;
+  const req = pool.request();
+  req.input("carkod", sql.NVarChar(40), carkod.slice(0, 40));
+  req.input("evrak", sql.NVarChar(80), String(evrakNo || "").trim().slice(0, 80));
+  const params = uniq.map((k, i) => {
+    req.input(`k${i}`, sql.NVarChar(40), k);
+    return `@k${i}`;
+  });
+  const rs = await req.query(`
+    WITH x AS (
+      SELECT
+        LTRIM(RTRIM(H.FATHARSTKKOD)) AS STKKOD,
+        ISNULL(H.FATHARFIYAT, 0) AS FIYAT,
+        ISNULL(H.FATHARDOVFIYAT, 0) AS DOVFIYAT,
+        ISNULL(H.FATHARTUTAR, 0) AS TUTAR,
+        ISNULL(H.FATHARNETTUTAR, 0) AS NETTUTAR,
+        ISNULL(H.FATHARDOVTUTAR, 0) AS DOVTUTAR,
+        ISNULL(H.FATHARMIKTAR, 0) AS MIKTAR,
+        ISNULL(NULLIF(LTRIM(RTRIM(F.FATFISDOVKOD)), ''), 'TRY') AS DOVKOD,
+        ROW_NUMBER() OVER (
+          PARTITION BY LTRIM(RTRIM(H.FATHARSTKKOD))
+          ORDER BY F.FATFISTAR DESC, F.FATFISREFNO DESC, H.FATHARSIRANO DESC
+        ) AS rn
+      FROM dbo.FATHAR H WITH (NOLOCK)
+      INNER JOIN dbo.FATFIS F WITH (NOLOCK) ON F.FATFISREFNO = H.FATHARREFNO
+      WHERE F.FATFISCARKOD = @carkod
+        AND LTRIM(RTRIM(H.FATHARSTKKOD)) IN (${params.join(", ")})
+        AND LTRIM(RTRIM(ISNULL(F.FATFISEVRAKNO1, ''))) <> @evrak
+        AND ISNULL(F.FATFISTIPI, 0) NOT IN (2, 4, 6)
+        AND ISNULL(H.FATHARMIKTAR, 0) <> 0
+    )
+    SELECT STKKOD, FIYAT, DOVFIYAT, TUTAR, NETTUTAR, DOVTUTAR, MIKTAR, DOVKOD
+    FROM x
+    WHERE rn = 1
+  `);
+  for (const row of rs.recordset || []) {
+    const kod = String(row.STKKOD || "").trim();
+    if (kod) map.set(kod, row);
+  }
+  return map;
 }
 

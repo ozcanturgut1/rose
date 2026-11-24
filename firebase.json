@@ -119,6 +119,11 @@
         "source": "/api/archiveQnbInvoice",
         "function": "archiveQnbInvoice",
         "region": "europe-west1"
+      },
+      {
+        "source": "/api/sonAlimFiyatlari",
+        "function": "sonAlimFiyatlari",
+        "region": "europe-west1"
       }
     ]
   }

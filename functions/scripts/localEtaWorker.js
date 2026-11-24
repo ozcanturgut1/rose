@@ -201,18 +201,24 @@ async function processDoc(db, docSnap, ctx) {
       onayBaslangic === "onaylandi" ? {} : { allowAutoStk: false }
     );
     if (result?.blocked) {
+      const tutar = result.status === "blocked_tutar";
       await ref.set(
         {
-          etaKayitDurumu: "beklemede_kurfarki",
+          etaKayitDurumu: tutar ? "beklemede_tutar" : "beklemede_kurfarki",
           etaKayitGuncellemeTarihi: FieldValue.serverTimestamp(),
-          // Kilit serbest bırakılır: bu karar her turda SQL'den yeniden hesaplanıyor,
+          // Kilit serbest bırakılır: bu karar her turda yeniden hesaplanıyor,
           // sorun giderildiğinde bir sonraki tur kaydı tamamlayabilmeli.
           etaIslemKilitBitisMs: 0,
-          etaKayitHata: result.blockMessage || "Kur farkı faturası: cari belirlenemedi.",
+          etaKayitHata:
+            result.blockMessage ||
+            (tutar
+              ? "Ödenecek tutar satırlarla tutmuyor."
+              : "Kur farkı faturası: cari belirlenemedi."),
           etaKayitDetay: {
-            status: result.status || "blocked_kurfarki",
+            status: result.status || (tutar ? "blocked_tutar" : "blocked_kurfarki"),
             blockReason: result.blockReason || null,
             adaylar: Array.isArray(result.blockDetail?.adaylar) ? result.blockDetail.adaylar : [],
+            ...(tutar && result.blockDetail ? { tutar: result.blockDetail } : {}),
           },
         },
         { merge: true }

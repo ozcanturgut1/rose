@@ -20,10 +20,16 @@ function normalizeProfileRole(raw) {
 }
 
 /**
- * Manuel yönlendirme hedefi olabilen roller: ara onay, Erdem (`ikinci_ara_onay`)
- * ve nihai onay (Sinan, Yasin). `assignQnbInvoiceAraOnay` aynı kümeyi doğrular.
+ * Manuel yönlendirme hedefi olabilen roller: ara onay, Erdem (`ikinci_ara_onay`),
+ * nihai onay (Sinan, Yasin) ve kur farkı ara onayı (`muhasebe2`).
+ * `assignQnbInvoiceAraOnay` aynı kümeyi doğrular. `muhasebe2` ara kuyrukta kalır.
  */
-export const YONLENDIRME_HEDEF_ROLLER = new Set(["ara_onay", "ikinci_ara_onay", "nihai_onay"]);
+export const YONLENDIRME_HEDEF_ROLLER = new Set([
+  "ara_onay",
+  "ikinci_ara_onay",
+  "nihai_onay",
+  "muhasebe2",
+]);
 
 /** @param {string} uid */
 async function requireYonlendirmeListeleyebilir(uid) {
@@ -35,7 +41,7 @@ async function requireYonlendirmeListeleyebilir(uid) {
     throw err;
   }
   const r = normalizeProfileRole(p.data()?.role);
-  if (r !== "ara_onay" && r !== "muhasebe") {
+  if (r !== "ara_onay" && r !== "muhasebe" && r !== "muhasebe2") {
     const err = new Error("Yalnızca ara onay veya muhasebe kullanıcıları listeleyebilir");
     // @ts-ignore
     err.status = 403;

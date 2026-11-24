@@ -100,6 +100,38 @@ export function belgeMetnindeKurFarki(afterData, lines) {
   return /kur\s*fark/.test(normalizeBelgeMetni(belgeMetni(afterData, lines)));
 }
 
+function notMetniBelge(data) {
+  const parts = [headerNotlari(data)];
+  const ubl = String(data?.contentUbl || "");
+  if (ubl) {
+    const re = /<cbc:Note[^>]*>([\s\S]*?)<\/cbc:Note>/gi;
+    let m;
+    while ((m = re.exec(ubl))) parts.push(String(m[1] || "").replace(/<[^>]+>/g, " "));
+  }
+  return parts.filter(Boolean).join(" ");
+}
+
+function kalemMetniBelge(data) {
+  const ubl = String(data?.contentUbl || "");
+  if (ubl) {
+    const re = /<cac:InvoiceLine\b[\s\S]*?<\/cac:InvoiceLine>/gi;
+    const parts = [];
+    let m;
+    while ((m = re.exec(ubl))) parts.push(m[0]);
+    if (parts.length) return parts.join(" ");
+  }
+  const up = data?.ublParsed && typeof data.ublParsed === "object" ? data.ublParsed : {};
+  const inv = Array.isArray(up.Invoice) ? up.Invoice[0] : up.Invoice;
+  if (!inv || typeof inv !== "object") return "";
+  return JSON.stringify(inv.InvoiceLine ?? "");
+}
+
+/** Liste süzmesi ile aynı: not veya satırda kur farkı. Vade/fiyat farkı sayılmaz. */
+export function kurFarkiBelgesi(data) {
+  if (!data || typeof data !== "object") return false;
+  return /kur\s*fark/.test(normalizeBelgeMetni(`${notMetniBelge(data)} ${kalemMetniBelge(data)}`));
+}
+
 function gecerliTarih(yil, ay, gun) {
   if (!Number.isInteger(yil) || !Number.isInteger(ay) || !Number.isInteger(gun)) return "";
   if (yil < 1990 || yil > 2100 || ay < 1 || ay > 12 || gun < 1 || gun > 31) return "";

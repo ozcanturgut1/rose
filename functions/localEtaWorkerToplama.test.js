@@ -53,6 +53,18 @@ test("supplierVkn dolu fatura iki aramada da bulunsa bir kez toplanır", async (
   assert.deepEqual([...docs.keys()], ["invoice_A"]);
 });
 
+test("boş onaylı kur farkı faturası Yasin ekranından toplanmaz", async () => {
+  const col = sahteKoleksiyon({
+    invoice_KUR: {
+      type: "invoice",
+      supplierVkn: "7331158248",
+      ublParsed: { Invoice: { Note: "kur farkı" } },
+    },
+  });
+  const { docs } = await collectPendingDocs(col, 25, 200, { kisiler: [sinan], baglam });
+  assert.equal(docs.size, 0);
+});
+
 test("ETA kaydı tamamlanmış veya listede olmayan VKN'li fatura toplanmaz", async () => {
   const col = sahteKoleksiyon({
     invoice_KAYITLI: {

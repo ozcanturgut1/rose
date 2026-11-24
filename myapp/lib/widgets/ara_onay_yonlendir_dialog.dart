@@ -3,6 +3,70 @@ import 'package:flutter/material.dart';
 
 import '../services/qnb_api.dart';
 
+String yonetimOnayMetni(String decision, String routed) {
+  return switch (decision) {
+    'onaya_sunuldu' when routed == 'erdem' => 'Fatura Erdem onayına gönderildi.',
+    'onaya_sunuldu' when routed == 'sinan' => 'Fatura Sinan onayına gönderildi.',
+    'onaya_sunuldu' => 'Fatura onaya sunuldu olarak kaydedildi.',
+    'onaylandı' => 'Fatura onaylandı olarak kaydedildi.',
+    _ => 'Fatura reddedildi olarak kaydedildi.',
+  };
+}
+
+/// Onay isteği ekran kapandıktan sonra sürer. Sonuç [messenger] ile bildirilir.
+Future<void> yonetimOnayiniBitir({
+  required ScaffoldMessengerState messenger,
+  required QnbApi api,
+  required String docId,
+  required String decision,
+  required String note,
+  String? aciklamaRole,
+  String belgeNo = '',
+  Future<bool>? kalemKaydi,
+  void Function()? bitti,
+}) async {
+  final etiket = belgeNo.isEmpty ? 'Fatura' : belgeNo;
+  try {
+    if (kalemKaydi != null && !await kalemKaydi) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('$etiket: kalem açıklamaları kaydedilemedi. İşlem iptal edildi.')),
+      );
+      return;
+    }
+    final res = await api.updateQnbInvoiceYonetimOnay(
+      docId: docId,
+      decision: decision,
+      note: note,
+      aciklamaRole: aciklamaRole,
+    );
+    final routed = (res['routedToBirim']?.toString() ?? '').trim();
+    messenger.showSnackBar(SnackBar(content: Text('$etiket: ${yonetimOnayMetni(decision, routed)}')));
+  } catch (e) {
+    messenger.showSnackBar(SnackBar(content: Text('$etiket işlemi tamamlanamadı: $e')));
+  } finally {
+    bitti?.call();
+  }
+}
+
+Future<void> faturayiYonlendirBitir({
+  required ScaffoldMessengerState messenger,
+  required QnbApi api,
+  required String docId,
+  required String targetUid,
+  String belgeNo = '',
+  void Function()? bitti,
+}) async {
+  final etiket = belgeNo.isEmpty ? 'Fatura' : belgeNo;
+  try {
+    await api.assignQnbInvoiceAraOnay(docId: docId, targetUid: targetUid);
+    messenger.showSnackBar(SnackBar(content: Text('$etiket yönlendirildi.')));
+  } catch (e) {
+    messenger.showSnackBar(SnackBar(content: Text('$etiket yönlendirilemedi: $e')));
+  } finally {
+    bitti?.call();
+  }
+}
+
 String _safeDocKey(String s) => s.replaceAll(RegExp(r'[/\\]'), '_');
 
 /// Liste veya detay satırından `qnb_invoices` doküman kimliği.
@@ -15,10 +79,10 @@ String invoiceDocIdFromItem(Map<String, dynamic> item) {
 }
 
 /// Ara onay: bekleyen faturayı başka bir onay kullanıcısına yönlendir
-/// (ara onay, Erdem veya nihai onay — Sinan / Yasin). Nihai hedefte fatura
-/// `onaya sunuldu` olur ve hedefin nihai kuyruğuna düşer.
-/// Başarılıysa `true` döner (çağıran liste yenilemek için kullanabilir).
-Future<bool> showAraOnayYonlendirDialog(
+/// (ara onay, Erdem, nihai onay veya muhasebe2). Nihai hedefte fatura
+/// `onaya sunuldu` olur ve hedefin nihai kuyruğuna düşer. `muhasebe2` ara kuyrukta kalır.
+/// Seçilen kullanıcının uid'si. İstek bu pencerede bekletilmez.
+Future<String?> showAraOnayYonlendirDialog(
   BuildContext context, {
   required QnbApi api,
   required Map<String, dynamic> item,
@@ -28,27 +92,23 @@ Future<bool> showAraOnayYonlendirDialog(
     ScaffoldMessenger.maybeOf(context)?.showSnackBar(
       const SnackBar(content: Text('BelgeNo / fatura kimliği bulunamadı.')),
     );
-    return false;
+    return null;
   }
 
   final self = FirebaseAuth.instance.currentUser?.uid ?? '';
-  final r = await showDialog<bool>(
+  return showDialog<String>(
     context: context,
-    barrierDismissible: false,
-    builder: (ctx) => _AraOnayYonlendirDialog(api: api, docId: docId, selfUid: self),
+    builder: (ctx) => _AraOnayYonlendirDialog(api: api, selfUid: self),
   );
-  return r == true;
 }
 
 class _AraOnayYonlendirDialog extends StatefulWidget {
   const _AraOnayYonlendirDialog({
     required this.api,
-    required this.docId,
     required this.selfUid,
   });
 
   final QnbApi api;
-  final String docId;
   final String selfUid;
 
   @override
@@ -58,7 +118,6 @@ class _AraOnayYonlendirDialog extends StatefulWidget {
 class _AraOnayYonlendirDialogState extends State<_AraOnayYonlendirDialog> {
   late Future<List<Map<String, dynamic>>> _usersFuture;
   String? _selectedUid;
-  bool _submitting = false;
 
   /// Açılır listede uid göstermeyiz; birim + görünen ad.
   static String _dropdownDisplayLine(Map<String, dynamic> u) {
@@ -76,7 +135,7 @@ class _AraOnayYonlendirDialogState extends State<_AraOnayYonlendirDialog> {
     _usersFuture = widget.api.listAraOnayUsersCached();
   }
 
-  Future<void> _submit() async {
+  void _submit() {
     final uid = _selectedUid?.trim() ?? '';
     if (uid.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -84,18 +143,7 @@ class _AraOnayYonlendirDialogState extends State<_AraOnayYonlendirDialog> {
       );
       return;
     }
-    setState(() => _submitting = true);
-    try {
-      await widget.api.assignQnbInvoiceAraOnay(docId: widget.docId, targetUid: uid);
-      if (!mounted) return;
-      Navigator.of(context).pop(true);
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
-      }
-    } finally {
-      if (mounted) setState(() => _submitting = false);
-    }
+    Navigator.of(context).pop(uid);
   }
 
   @override
@@ -153,29 +201,19 @@ class _AraOnayYonlendirDialogState extends State<_AraOnayYonlendirDialog> {
                       ),
                     ),
               ],
-              onChanged: _submitting
-                  ? null
-                  : (v) {
-                      setState(() => _selectedUid = v);
-                    },
+              onChanged: (v) => setState(() => _selectedUid = v),
             );
           },
         ),
       ),
       actions: [
         TextButton(
-          onPressed: _submitting ? null : () => Navigator.of(context).pop(false),
+          onPressed: () => Navigator.of(context).pop(),
           child: const Text('İptal'),
         ),
         FilledButton(
-          onPressed: _submitting ? null : _submit,
-          child: _submitting
-              ? const SizedBox(
-                  width: 22,
-                  height: 22,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Text('Yönlendir'),
+          onPressed: _submit,
+          child: const Text('Yönlendir'),
         ),
       ],
     );

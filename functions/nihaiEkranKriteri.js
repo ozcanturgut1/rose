@@ -1,3 +1,5 @@
+import { kurFarkiBelgesi } from "./cekSenetKurFarki.js";
+
 /**
  * Yasin / Sinan ekranı ile ETA kaydı ve arşiv kuyruğu ayrı kapılardır.
  *
@@ -94,6 +96,8 @@ export function faturaNihaiEkranda(data, kisi, sube) {
     return true;
   }
   if (onay !== "") return false;
+  // Kur farkı önce muhasebe2 ara onayındadır. Onaya sunulunca yukarıdaki kola girer.
+  if (kurFarkiBelgesi(data)) return false;
   if (!kisi.vkns || kisi.vkns.size === 0) return false;
   const assigned = String(data?.araOnayAtananUid || "").trim();
   const yonlendiren = String(data?.araOnayYonlendirenUid || "").trim();

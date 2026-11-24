@@ -63,6 +63,25 @@ test("elle Erdem'e yönlendirilmiş fatura onların ekranında değildir", () =>
   assert.equal(yasinVeyaSinanEkraninda(data, kisiler, "yasin"), false);
 });
 
+test("boş onaylı kur farkı faturası Yasin ekranında değildir", () => {
+  const data = {
+    onayDurumu: "",
+    supplierVkn: "111",
+    ublParsed: { Invoice: { Note: "Kur farkı faturası" } },
+  };
+  assert.equal(faturaNihaiEkranda(data, yasin, ""), false);
+  assert.equal(kaydaUygun(data, kisiler, ""), false);
+});
+
+test("onaya sunulmuş kur farkı faturası Yasin ekranındadır", () => {
+  const data = {
+    onayDurumu: "onaya sunuldu",
+    supplierVkn: "111",
+    ublParsed: { Invoice: { Note: "Kur farkı faturası" } },
+  };
+  assert.equal(faturaNihaiEkranda(data, yasin, ""), true);
+});
+
 test("onaylanmış fatura ekranda olmasa da kayda uygundur", () => {
   const data = { onayDurumu: "onaylandı", supplierVkn: "999" };
   assert.equal(yasinVeyaSinanEkraninda(data, kisiler, ""), false);

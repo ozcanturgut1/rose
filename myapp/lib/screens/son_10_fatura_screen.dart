@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -6,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../formatting/display_date.dart';
+import '../services/kur_farki_fatura.dart';
 import '../services/qnb_api.dart';
 import '../widgets/ara_onay_yonlendir_dialog.dart';
 import '../widgets/muhasebe_fisi_dialog.dart';
@@ -19,7 +21,9 @@ import 'invoice_pdf_review_screen.dart';
 /// **ara_onay** / **ikinci_ara_onay** / **nihai_onay** / **muhasebe**: Yalnızca Firestore; tarih/sorgu yok (sayfalı okuma).
 /// Ekranda yalnızca liste + AppBar **Çıkış**.
 ///
-/// - `ara_onay` → `onayDurumu` boş
+/// - `ara_onay` → `onayDurumu` boş. Kur farkı faturaları bu listede durmaz.
+/// - `muhasebe2` → aynı ara kuyruk, yalnız kur farkı faturaları. Elle başkasına
+///   yönlendirilmemiş olanlar bu ekrana düşer.
 /// - `ikinci_ara_onay` → aynı ara kuyruk. Birimi `erdem` olan kullanıcı kendisine atananları
 ///   ve `suppliers/erdem` VKN’lerini görür.
 /// - `nihai_onay` → `onayDurumu == onaya sunuldu`
@@ -127,7 +131,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
   String get _listFilterMode {
     final r =
         widget.userRole?.trim().toLowerCase().replaceAll(RegExp(r'\s+'), '_') ?? '';
-    if (r == 'ara_onay' || r == 'ikinci_ara_onay') return 'ara_onay';
+    if (r == 'ara_onay' || r == 'ikinci_ara_onay' || r == 'muhasebe2') return 'ara_onay';
     if (r == 'nihai_onay') return 'nihai_onay';
     if (r == 'muhasebe') return 'muhasebe';
     if (r == 'admin') return 'admin';
@@ -138,6 +142,12 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     final r =
         widget.userRole?.trim().toLowerCase().replaceAll(RegExp(r'\s+'), '_') ?? '';
     return r == 'ikinci_ara_onay';
+  }
+
+  bool get _isMuhasebe2 {
+    final r =
+        widget.userRole?.trim().toLowerCase().replaceAll(RegExp(r'\s+'), '_') ?? '';
+    return r == 'muhasebe2';
   }
 
   /// Ara / nihai / muhasebe: sadeleştirilmiş arayüz, portala bağlanmadan Firestore listesi.
@@ -247,6 +257,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
       'odenecekTutar': qm['odenecekTutar'],
       'odenecekTutarDovizCinsi': qm['odenecekTutarDovizCinsi'],
       'gondericiUnvanDisplay': _gondericiUnvanFromDoc(data),
+      'onayDurumu': data['onayDurumu'],
       'etaKayitDurumu': data['etaKayitDurumu'],
       'etaKayitHata': data['etaKayitHata'],
       'arsivDurumu': data['arsivDurumu'],
@@ -311,7 +322,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
           .trim()
           .toLowerCase()
           .replaceAll(RegExp(r'\s+'), '_');
-      if (rol != 'ara_onay' && rol != 'ikinci_ara_onay' && rol != 'nihai_onay') continue;
+      if (rol != 'ara_onay' && rol != 'ikinci_ara_onay' && rol != 'nihai_onay' && rol != 'muhasebe2') continue;
       ekranlar.add(
         _OnayEkrani(
           uid: d.id,
@@ -375,32 +386,39 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     } else {
       final assigned = (data['araOnayAtananUid']?.toString() ?? '').trim();
       final yonlendiren = (data['araOnayYonlendirenUid']?.toString() ?? '').trim();
-      final sube = _hedefSubeBirimi(
-        data,
-        ekranlar: ekranlar,
-        vknByBirim: vknByBirim,
-        plakaYeri: plakaYeri,
-      );
-      if (sube.isNotEmpty && yonlendiren.isEmpty) {
-        adlar.add(sube);
-      } else if (assigned.isNotEmpty) {
+      if (kurFarkiFaturasi(data) && yonlendiren.isEmpty) {
         for (final e in ekranlar) {
-          if (e.uid != assigned) continue;
-          if (e.rol == 'ara_onay' || e.rol == 'ikinci_ara_onay' || e.rol == 'nihai_onay') {
-            adlar.add(e.birim);
-          }
+          if (e.rol != 'muhasebe2') continue;
+          adlar.add(e.birim.trim().isEmpty ? 'muhasebe2' : e.birim);
         }
       } else {
-        final vkn = _invoiceSupplierVknDigits(data);
-        for (final e in ekranlar) {
-          if (e.birim.isEmpty || vkn == null) continue;
-          final allowed = vknByBirim[e.birim] ?? const <String>{};
-          if (allowed.isEmpty || !allowed.contains(vkn)) continue;
-          if (e.rol == 'ara_onay' || e.rol == 'ikinci_ara_onay') {
-            adlar.add(e.birim);
-          } else if (e.rol == 'nihai_onay') {
-            final norm = _normBirim(e.birim);
-            if (norm == 'sinan' || norm == 'yasin') adlar.add(e.birim);
+        final sube = _hedefSubeBirimi(
+          data,
+          ekranlar: ekranlar,
+          vknByBirim: vknByBirim,
+          plakaYeri: plakaYeri,
+        );
+        if (sube.isNotEmpty && yonlendiren.isEmpty) {
+          adlar.add(sube);
+        } else if (assigned.isNotEmpty) {
+          for (final e in ekranlar) {
+            if (e.uid != assigned) continue;
+            if (e.rol == 'ara_onay' || e.rol == 'ikinci_ara_onay' || e.rol == 'nihai_onay' || e.rol == 'muhasebe2') {
+              adlar.add(e.birim);
+            }
+          }
+        } else {
+          final vkn = _invoiceSupplierVknDigits(data);
+          for (final e in ekranlar) {
+            if (e.birim.isEmpty || vkn == null) continue;
+            final allowed = vknByBirim[e.birim] ?? const <String>{};
+            if (allowed.isEmpty || !allowed.contains(vkn)) continue;
+            if (e.rol == 'ara_onay' || e.rol == 'ikinci_ara_onay') {
+              adlar.add(e.birim);
+            } else if (e.rol == 'nihai_onay') {
+              final norm = _normBirim(e.birim);
+              if (norm == 'sinan' || norm == 'yasin') adlar.add(e.birim);
+            }
           }
         }
       }
@@ -423,6 +441,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     final onay = data['onayDurumu']?.toString().trim() ?? '';
     final nihaiHavuz = _onayDurumuIsNihaiPool(data['onayDurumu']);
     if (!nihaiHavuz && onay.isNotEmpty) return const [];
+    if (!nihaiHavuz && kurFarkiFaturasi(data)) return const [];
     final hedefUid = (data['nihaiOnayAtananUid']?.toString() ?? '').trim();
     final assigned = (data['araOnayAtananUid']?.toString() ?? '').trim();
     final yonlendiren = (data['araOnayYonlendirenUid']?.toString() ?? '').trim();
@@ -859,21 +878,32 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
         if (onay.isNotEmpty) continue;
         final assigned = (data['araOnayAtananUid']?.toString() ?? '').trim();
         final yonlendiren = (data['araOnayYonlendirenUid']?.toString() ?? '').trim();
-        final sube = _hedefSubeBirimi(
-          data,
-          ekranlar: ekranBaglam!.ekranlar,
-          vknByBirim: ekranBaglam.vknByBirim,
-          plakaYeri: ekranBaglam.plakaYeri,
-        );
-        if (sube.isNotEmpty && yonlendiren.isEmpty) {
-          if (_normBirim(profileBirim) != sube) continue;
-        } else {
-          if (assigned.isNotEmpty && assigned != myUid) continue;
-          if (assigned.isEmpty && profileBirim.isNotEmpty) {
-            final allowed = araOnaySupplierVkns ?? <String>{};
-            if (allowed.isEmpty) continue;
-            final vkn = _invoiceSupplierVknDigits(data);
-            if (vkn == null || !allowed.contains(vkn)) continue;
+        final kurFarki = kurFarkiFaturasi(data);
+        final bana = assigned.isNotEmpty && assigned == myUid;
+        if (_isMuhasebe2) {
+          final baskasina = yonlendiren.isNotEmpty && assigned.isNotEmpty && assigned != myUid;
+          if (baskasina) continue;
+          if (!kurFarki && !bana) continue;
+        } else if (kurFarki && !bana) {
+          continue;
+        }
+        if (!_isMuhasebe2) {
+          final sube = _hedefSubeBirimi(
+            data,
+            ekranlar: ekranBaglam!.ekranlar,
+            vknByBirim: ekranBaglam.vknByBirim,
+            plakaYeri: ekranBaglam.plakaYeri,
+          );
+          if (sube.isNotEmpty && yonlendiren.isEmpty) {
+            if (_normBirim(profileBirim) != sube) continue;
+          } else {
+            if (assigned.isNotEmpty && assigned != myUid) continue;
+            if (assigned.isEmpty && profileBirim.isNotEmpty) {
+              final allowed = araOnaySupplierVkns ?? <String>{};
+              if (allowed.isEmpty) continue;
+              final vkn = _invoiceSupplierVknDigits(data);
+              if (vkn == null || !allowed.contains(vkn)) continue;
+            }
           }
         }
       } else if (mode == 'nihai_onay') {
@@ -887,6 +917,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
         } else if (portalVkns != null &&
             portalVkns.isNotEmpty &&
             onay.isEmpty) {
+          if (kurFarkiFaturasi(data)) continue;
           final assigned = (data['araOnayAtananUid']?.toString() ?? '').trim();
           final yonlendiren = (data['araOnayYonlendirenUid']?.toString() ?? '').trim();
           final sube = _hedefSubeBirimi(
@@ -947,35 +978,42 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     super.dispose();
   }
 
-  Future<void> _load() async {
+  Future<void> _load({bool sessiz = false}) async {
     if (_isMinimalApproverUi) {
-      setState(() {
-        loading = true;
-        error = null;
-        _selectedBelgeNosForBackfill.clear();
-        _seciliNihaiDocIds.clear();
-      });
-      try {
-        final list = await _fetchInvoicesFromFirestoreOnly();
-        if (!mounted) return;
+      if (!sessiz) {
         setState(() {
-          items = list;
-          loading = false;
-          _lastResponseJson = null;
-          _selectedBelgeNosForBackfill.clear();
-          _seciliNihaiDocIds.clear();
-        });
-      } catch (e) {
-        setState(() {
-          error = e.toString();
-          loading = false;
-          _lastResponseJson = null;
+          loading = true;
+          error = null;
           _selectedBelgeNosForBackfill.clear();
           _seciliNihaiDocIds.clear();
         });
       }
-      return;
+      try {
+        final list = await _fetchInvoicesFromFirestoreOnly();
+      if (!mounted) return;
+      setState(() {
+        items = list;
+        loading = false;
+        _lastResponseJson = null;
+        if (!sessiz) {
+          _selectedBelgeNosForBackfill.clear();
+          _seciliNihaiDocIds.clear();
+        }
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        error = e.toString();
+        loading = false;
+        if (!sessiz) {
+          _lastResponseJson = null;
+          _selectedBelgeNosForBackfill.clear();
+          _seciliNihaiDocIds.clear();
+        }
+      });
     }
+    return;
+  }
 
     final a = _fromController.text.trim();
     final b = _toController.text.trim();
@@ -988,12 +1026,14 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
       return;
     }
 
-    setState(() {
-      loading = true;
-      error = null;
-      _selectedBelgeNosForBackfill.clear();
-      _adminListPage = 0;
-    });
+    if (!sessiz) {
+      setState(() {
+        loading = true;
+        error = null;
+        _selectedBelgeNosForBackfill.clear();
+        _adminListPage = 0;
+      });
+    }
     try {
       final data = await widget.api.listGelenBelgeleriExt(
         limit: _adminPortalListLimit,
@@ -1016,17 +1056,39 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
         items = list;
         loading = false;
         _lastResponseJson = jsonText;
-        _selectedBelgeNosForBackfill.clear();
-        _seciliNihaiDocIds.clear();
-        _adminListPage = 0;
+        if (!sessiz) {
+          _selectedBelgeNosForBackfill.clear();
+          _seciliNihaiDocIds.clear();
+          _adminListPage = 0;
+        }
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         error = e.toString();
         loading = false;
-        _lastResponseJson = null;
+        if (!sessiz) _lastResponseJson = null;
       });
     }
+  }
+
+  void _listedenCikar(Map<String, dynamic> it) {
+    final docId = (it['invoiceDocId']?.toString() ?? '').trim();
+    final belge = (it['belgeNo']?.toString() ?? '').trim();
+    setState(() {
+      items.removeWhere((row) {
+        final id = (row['invoiceDocId']?.toString() ?? '').trim();
+        final no = (row['belgeNo']?.toString() ?? '').trim();
+        if (docId.isNotEmpty && id == docId) return true;
+        return belge.isNotEmpty && no == belge;
+      });
+      if (docId.isNotEmpty) _seciliNihaiDocIds.remove(docId);
+    });
+  }
+
+  void _islemBitti() {
+    if (!mounted) return;
+    unawaited(_load(sessiz: true));
   }
 
   /// Aynı geliş tarih aralığı için portaldan indirip `qnb_invoices` koleksiyonuna yazar (UBL dahil).
@@ -1346,10 +1408,25 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
     );
     if (onay != true || !mounted) return;
 
+    final messenger = ScaffoldMessenger.of(context);
+    final kopya = List<Map<String, dynamic>>.from(secilen);
     setState(() {
-      _nihaiTopluOnay = true;
-      error = null;
+      _seciliNihaiDocIds.clear();
+      final idler = kopya.map((it) => (it['invoiceDocId']?.toString() ?? '').trim()).where((id) => id.isNotEmpty).toSet();
+      final nolar = kopya.map((it) => (it['belgeNo']?.toString() ?? '').trim()).where((no) => no.isNotEmpty).toSet();
+      items.removeWhere((row) {
+        final id = (row['invoiceDocId']?.toString() ?? '').trim();
+        final no = (row['belgeNo']?.toString() ?? '').trim();
+        return idler.contains(id) || nolar.contains(no);
+      });
     });
+    unawaited(_topluOnayiBitir(messenger, kopya));
+  }
+
+  Future<void> _topluOnayiBitir(
+    ScaffoldMessengerState messenger,
+    List<Map<String, dynamic>> secilen,
+  ) async {
     var tamam = 0;
     String? hata;
     for (final it in secilen) {
@@ -1366,9 +1443,7 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
         break;
       }
     }
-    if (!mounted) return;
-    setState(() => _nihaiTopluOnay = false);
-    ScaffoldMessenger.of(context).showSnackBar(
+    messenger.showSnackBar(
       SnackBar(
         content: Text(
           hata == null
@@ -1377,17 +1452,24 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
         ),
       ),
     );
-    await _load();
-    if (hata != null && mounted) setState(() => error = hata);
+    if (mounted) await _load(sessiz: true);
   }
 
   Future<void> _yonlendirFatura(BuildContext context, Map<String, dynamic> it) async {
-    final ok = await showAraOnayYonlendirDialog(context, api: widget.api, item: it);
-    if (!context.mounted) return;
-    if (ok) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Fatura yönlendirildi.')));
-      await _load();
-    }
+    final uid = await showAraOnayYonlendirDialog(context, api: widget.api, item: it);
+    if (!context.mounted || uid == null || uid.isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final docId = (it['invoiceDocId']?.toString() ?? '').trim();
+    final belgeNo = (it['belgeNo']?.toString() ?? '').trim();
+    _listedenCikar(it);
+    unawaited(faturayiYonlendirBitir(
+      messenger: messenger,
+      api: widget.api,
+      docId: docId.isNotEmpty ? docId : invoiceDocIdFromItem(it),
+      targetUid: uid,
+      belgeNo: belgeNo,
+      bitti: _islemBitti,
+    ));
   }
 
   /// Muhasebe: arşive taşımadan önce faturanın ETA mahsup fişini gösterir.
@@ -1466,25 +1548,26 @@ class _Son10FaturaScreenState extends State<Son10FaturaScreen> {
       setState(() => error = 'BelgeNo bulunamadı.');
       return;
     }
-    final listChanged = await Navigator.of(context).push<bool>(
-      MaterialPageRoute<bool>(
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
         builder: (_) => _listTapShowsJson
             ? InvoiceJsonReviewScreen(
                 api: widget.api,
                 item: it,
                 userRole: widget.userRole,
+                profileBirim: widget.profileBirim,
+                onIslemBasladi: () => _listedenCikar(it),
+                onIslemBitti: _islemBitti,
               )
             : InvoicePdfReviewScreen(
                 api: widget.api,
                 item: it,
                 userRole: widget.userRole,
+                onIslemBasladi: () => _listedenCikar(it),
+                onIslemBitti: _islemBitti,
               ),
       ),
     );
-    if (!mounted) return;
-    if (listChanged == true) {
-      await _load();
-    }
   }
 
   Widget _buildDateRangeFields() {

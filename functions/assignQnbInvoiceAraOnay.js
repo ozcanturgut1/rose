@@ -35,7 +35,7 @@ async function requireYonlendirenProfile(uid) {
   }
   const data = p.data() || {};
   const r = normalizeProfileRole(data.role);
-  if (r !== "ara_onay" && r !== "muhasebe") {
+  if (r !== "ara_onay" && r !== "muhasebe" && r !== "muhasebe2") {
     const err = new Error("Yalnızca ara onay veya muhasebe kullanıcıları yönlendirebilir");
     // @ts-ignore
     err.status = 403;

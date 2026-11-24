@@ -28,6 +28,7 @@ import { updateQnbInvoiceYonetimOnay } from "./updateQnbInvoiceYonetimOnay.js";
 import { listAraOnayUsers } from "./listAraOnayUsers.js";
 import { assignQnbInvoiceAraOnay } from "./assignQnbInvoiceAraOnay.js";
 import { archiveQnbInvoice } from "./archiveQnbInvoice.js";
+import { sonAlimFiyatlari } from "./sonAlimFiyatlari.js";
 import { onQnbInvoiceApproved } from "./triggers/onQnbInvoiceApproved.js";
 import { autoSupplierInvoicePipeline } from "./autoSupplierInvoicePipeline.js";
 
@@ -56,6 +57,7 @@ export {
   listAraOnayUsers,
   assignQnbInvoiceAraOnay,
   archiveQnbInvoice,
+  sonAlimFiyatlari,
   onQnbInvoiceApproved,
   autoSupplierInvoicePipeline,
 };

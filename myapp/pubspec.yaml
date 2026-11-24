@@ -43,7 +43,6 @@ dependencies:
   file_picker:
   cunning_document_scanner:
   google_mlkit_text_recognition:
-  camera:
   printing: ^5.13.4
   pdf: ^3.11.3
 

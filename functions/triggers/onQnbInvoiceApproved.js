@@ -112,20 +112,32 @@ export const onQnbInvoiceApproved = onDocumentUpdated(
       // Kur farkı faturası birden fazla döviz cariye denk gelip belirsizse: kayıt yapılmaz,
       // neden Firestore'a yazılır (arayüzde gösterilir), arşivlenmez.
       if (result?.blocked) {
+        const tutar = result.status === "blocked_tutar";
         await ref.set(
           {
-            etaKayitDurumu: "beklemede_kurfarki",
+            etaKayitDurumu: tutar ? "beklemede_tutar" : "beklemede_kurfarki",
             etaKayitGuncellemeTarihi: FieldValue.serverTimestamp(),
-            etaKayitHata: result.blockMessage || "Kur farkı faturası: cari belirlenemedi.",
+            etaKayitHata:
+              result.blockMessage ||
+              (tutar
+                ? "Ödenecek tutar satırlarla tutmuyor."
+                : "Kur farkı faturası: cari belirlenemedi."),
             etaKayitDetay: {
-              status: result.status || "blocked_kurfarki",
+              status: result.status || (tutar ? "blocked_tutar" : "blocked_kurfarki"),
               blockReason: result.blockReason || null,
               adaylar: Array.isArray(result.blockDetail?.adaylar) ? result.blockDetail.adaylar : [],
+              ...(tutar && result.blockDetail ? { tutar: result.blockDetail } : {}),
             },
           },
           { merge: true }
         );
-        console.warn("onQnbInvoiceApproved: kur farkı belirsiz, ETA kaydı yapılmadı", docId, result.blockReason);
+        console.warn(
+          tutar
+            ? "onQnbInvoiceApproved: ödenecek tutar satırlarla tutmuyor, ETA kaydı yapılmadı"
+            : "onQnbInvoiceApproved: kur farkı belirsiz, ETA kaydı yapılmadı",
+          docId,
+          result.blockReason
+        );
         return;
       }
       await ref.set(

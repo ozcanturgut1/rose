@@ -34,6 +34,7 @@ class MyApp extends StatelessWidget {
       baseListAraOnayUsersUrl: qnbFunctionUrl('listAraOnayUsers'),
       baseAssignQnbInvoiceAraOnayUrl: qnbFunctionUrl('assignQnbInvoiceAraOnay'),
       baseArchiveQnbInvoiceUrl: qnbFunctionUrl('archiveQnbInvoice'),
+      baseSonAlimFiyatlariUrl: qnbFunctionUrl('sonAlimFiyatlari'),
     );
 
     return MaterialApp(

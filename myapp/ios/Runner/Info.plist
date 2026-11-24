@@ -45,5 +45,9 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>İmzalı teslim belgesinin fotoğrafını çekmek için kamera kullanılır.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>İmzalı teslim belgesi fotoğrafını seçmek için galeri kullanılır.</string>
 </dict>
 </plist>

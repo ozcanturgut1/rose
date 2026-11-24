@@ -27,6 +27,7 @@ class QnbApi {
     required this.baseListAraOnayUsersUrl,
     required this.baseAssignQnbInvoiceAraOnayUrl,
     required this.baseArchiveQnbInvoiceUrl,
+    required this.baseSonAlimFiyatlariUrl,
   });
 
   final String baseListUrl;    // https://listqnbdocs-...a.run.app
@@ -53,6 +54,9 @@ class QnbApi {
   final String baseAssignQnbInvoiceAraOnayUrl;
   /// Muhasebe kontrolü sonrası faturayı ve irsaliyelerini arşiv koleksiyonlarına taşır.
   final String baseArchiveQnbInvoiceUrl;
+
+  /// Sinan ekranı: kalemin son alım birim fiyatı. ETA'ya yazmaz.
+  final String baseSonAlimFiyatlariUrl;
 
   Future<String> _idToken() async {
     final auth = FirebaseAuth.instance;
@@ -164,7 +168,7 @@ class QnbApi {
   }
 
   /// Yönlendirme hedefi olabilecek kullanıcılar: `user_profiles.role` değeri
-  /// `ara_onay`, `ikinci_ara_onay` (Erdem) veya `nihai_onay` (Sinan, Yasin).
+  /// `ara_onay`, `ikinci_ara_onay` (Erdem), `nihai_onay` (Sinan, Yasin) veya `muhasebe2`.
   Future<List<Map<String, dynamic>>> listAraOnayUsers() async {
     final token = await _idToken();
     final uri = Uri.parse(baseListAraOnayUsersUrl);
@@ -253,6 +257,30 @@ class QnbApi {
     }
     final decoded = jsonDecode(r.body);
     return (decoded as Map).cast<String, dynamic>();
+  }
+
+  /// Sinan'ın onaylayacağı faturanın kalemleri için son alım birim fiyatı.
+  /// Dönüş: `sira` (1 tabanlı), `fiyat`, `paraBirimi`. Yoksa boş liste.
+  Future<List<Map<String, dynamic>>> sonAlimFiyatlari({required String docId}) async {
+    final token = await _idToken();
+    final uri = Uri.parse(baseSonAlimFiyatlariUrl);
+    final r = await http.post(
+      uri,
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: jsonEncode({'docId': docId.trim()}),
+    );
+    if (r.statusCode >= 400) {
+      throw Exception('SON_ALIM_FIYAT_FAILED ${r.statusCode}: ${r.body}');
+    }
+    final decoded = jsonDecode(r.body);
+    if (decoded is! Map) return [];
+    final raw = decoded['satirlar'];
+    if (raw is! List) return [];
+    return raw.whereType<Map>().map((e) => e.cast<String, dynamic>()).toList();
   }
 
   /// Faturanın irsaliyelerini ve her birinin görüntü özetini (belgeOzet) döndürür.

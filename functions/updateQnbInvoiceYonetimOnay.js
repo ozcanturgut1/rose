@@ -146,7 +146,7 @@ async function requireInvoiceOnayPermission(uid) {
   const p = await db.collection("user_profiles").doc(uid).get();
   if (p.exists) {
     const r = normalizeProfileRole(p.data()?.role);
-    if (["admin", "ara_onay", "ikinci_ara_onay", "nihai_onay", "muhasebe"].includes(r)) return;
+    if (["admin", "ara_onay", "ikinci_ara_onay", "nihai_onay", "muhasebe", "muhasebe2"].includes(r)) return;
   }
   await requireRole(uid, ROLES_QNB_MUTATE);
 }
@@ -283,7 +283,7 @@ export const updateQnbInvoiceYonetimOnay = onRequest({ region: "europe-west1" },
     if (onayDurumu === "reddedildi") {
       Object.assign(patch, onayZinciriEkle(data, user.uid, callerData, "reddetti"));
       const profRol = normalizeProfileRole(callerData.role);
-      if (profRol === "ara_onay" || profRol === "ikinci_ara_onay" || profRol === "nihai_onay") {
+      if (profRol === "ara_onay" || profRol === "ikinci_ara_onay" || profRol === "nihai_onay" || profRol === "muhasebe2") {
         patch.reddedenRol = profRol;
         patch.reddedenUid = user.uid;
       }

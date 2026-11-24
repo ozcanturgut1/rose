@@ -4,13 +4,16 @@ import 'package:flutter/material.dart';
 
 import '../services/qnb_api.dart';
 import 'son_10_fatura_screen.dart';
+import 'teslim_belgesi_cek_screen.dart';
 
 /// Firestore `user_profiles/{uid}` → `role` zorunlu; tanımsız / boş / desteklenmeyen rol → erişim yok.
 ///
 /// - **admin** → portal + tarih + Sorgula + tüm araçlar
 /// - **ara_onay** / **ikinci_ara_onay** / **nihai_onay** → yalnızca Firestore listesi (tarih/sorgu yok; tüm uygun faturalar)
+/// - **muhasebe2** → ara onay listesi; yalnızca kur farkı faturaları
 /// - **muhasebe** → yalnızca `onayDurumu == onaylandı` faturalar (Firestore, tarih/sorgu yok)
 /// - **depo** → son 10 portal faturası listesi (salt okuma API ile aynı ekran)
+/// - **fotograf** → yalnızca teslim belgesi fotoğrafı
 class UserHomeRouter extends StatelessWidget {
   const UserHomeRouter({super.key, required this.api, required this.user});
 
@@ -30,7 +33,9 @@ class UserHomeRouter extends StatelessWidget {
         normalized == 'ikinci_ara_onay' ||
         normalized == 'nihai_onay' ||
         normalized == 'muhasebe' ||
-        normalized == 'depo';
+        normalized == 'muhasebe2' ||
+        normalized == 'depo' ||
+        normalized == 'fotograf';
   }
 
   @override
@@ -75,11 +80,13 @@ class UserHomeRouter extends StatelessWidget {
         if (!_isAllowedRole(normalized)) {
           return _BlockedAccessScreen(
             message:
-                'Desteklenmeyen rol: ${roleRaw ?? normalized}\n\nYalnızca admin, ara_onay, ikinci_ara_onay, nihai_onay, muhasebe veya depo kullanılabilir.',
+                'Desteklenmeyen rol: ${roleRaw ?? normalized}\n\nYalnızca admin, ara_onay, ikinci_ara_onay, nihai_onay, muhasebe, muhasebe2, depo veya fotograf kullanılabilir.',
           );
         }
 
         switch (normalized) {
+          case 'fotograf':
+            return const TeslimBelgesiCekScreen();
           case 'depo':
             return Son10FaturaScreen(
               api: api,
@@ -91,6 +98,7 @@ class UserHomeRouter extends StatelessWidget {
           case 'ikinci_ara_onay':
           case 'nihai_onay':
           case 'muhasebe':
+          case 'muhasebe2':
             return Son10FaturaScreen(
               api: api,
               userRole: roleRaw ?? normalized,

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -5,9 +6,11 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../formatting/display_date.dart';
+import '../formatting/son_alim_fiyat.dart';
 import '../services/qnb_api.dart';
 import '../widgets/ara_onay_yonlendir_dialog.dart';
 import '../widgets/muhasebe_fisi_dialog.dart';
+import '../widgets/teslim_belgesi_gorunum.dart';
 
 String _safeDocKey(String s) => s.replaceAll(RegExp(r'[/\\]'), '_');
 
@@ -1072,6 +1075,27 @@ double _kalemDinamikSutunGenisligi(String anahtar) {
   }
   final base = 72.0 + anahtar.length * 4.2;
   return base.clamp(88.0, 240.0);
+}
+
+double _kalemSutunGenisligi(String anahtar, {required bool sonAlim}) {
+  final g = _kalemDinamikSutunGenisligi(anahtar);
+  if (!sonAlim) return g;
+  if (anahtar == 'Price/PriceAmount' || anahtar == 'kargo/birimFiyat') {
+    return g < 280 ? 280 : g;
+  }
+  return g;
+}
+
+String _normBirim(String raw) {
+  var s = raw.trim().replaceAll('İ', 'i').replaceAll('I', 'ı');
+  s = s.toLowerCase();
+  return s
+      .replaceAll('ı', 'i')
+      .replaceAll('ş', 's')
+      .replaceAll('ğ', 'g')
+      .replaceAll('ü', 'u')
+      .replaceAll('ö', 'o')
+      .replaceAll('ç', 'c');
 }
 
 void _hucreleriDoldur(Map<String, dynamic> row, Map<String, String> ekstra) {
@@ -2439,6 +2463,9 @@ class InvoiceJsonReviewScreen extends StatefulWidget {
     required this.api,
     required this.item,
     this.userRole,
+    this.profileBirim,
+    this.onIslemBasladi,
+    this.onIslemBitti,
   });
 
   final QnbApi api;
@@ -2446,6 +2473,15 @@ class InvoiceJsonReviewScreen extends StatefulWidget {
 
   /// [UserHomeRouter] / `user_profiles.role` — muhasebede onay çubuğu gösterilmez.
   final String? userRole;
+
+  /// [UserHomeRouter] / `user_profiles.birim`. Son alım fiyatı yalnız `sinan` ekranında.
+  final String? profileBirim;
+
+  /// Onay, red veya yönlendirme düğmesine basılınca, istek bitmeden önce.
+  final VoidCallback? onIslemBasladi;
+
+  /// Arka plandaki istek bitince.
+  final VoidCallback? onIslemBitti;
 
   @override
   State<InvoiceJsonReviewScreen> createState() => _InvoiceJsonReviewScreenState();
@@ -2456,8 +2492,10 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
   final TextEditingController _noteCtrl = TextEditingController();
   final GlobalKey<_KalemKullaniciAciklamaPanelState> _kalemAciklamaPanelKey =
       GlobalKey<_KalemKullaniciAciklamaPanelState>();
-  bool _saving = false;
   bool _mahsupAcik = false;
+
+  /// Kalem sırası (0 tabanlı) → son alım birim fiyatı. Yalnız Sinan ekranında dolar.
+  final Map<int, ({num fiyat, String paraBirimi})> _sonAlim = {};
 
   /// Muhasebe: yalnızca önizleme; açıklama ve Onayla/Reddet yok ([InvoicePdfReviewScreen] ile aynı).
   bool get _isMuhasebe {
@@ -2470,7 +2508,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
   bool get _isAraOnay {
     final r =
         widget.userRole?.trim().toLowerCase().replaceAll(RegExp(r'\s+'), '_') ?? '';
-    return r == 'ara_onay' || r == 'ikinci_ara_onay';
+    return r == 'ara_onay' || r == 'ikinci_ara_onay' || r == 'muhasebe2';
   }
 
   String _normalizedUserRole() =>
@@ -2478,7 +2516,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
 
   String? _aciklamaRoleForApi() {
     final r = _normalizedUserRole();
-    if (r == 'ikinci_ara_onay') return 'ara_onay';
+    if (r == 'ikinci_ara_onay' || r == 'muhasebe2') return 'ara_onay';
     if (r == 'ara_onay' || r == 'nihai_onay' || r == 'muhasebe' || r == 'admin') return r;
     return null;
   }
@@ -2488,10 +2526,47 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
     return 'invoice_${_safeDocKey(belgeNo)}';
   }
 
+  bool get _sinanEkrani => _normBirim(widget.profileBirim ?? '') == 'sinan';
+
   @override
   void initState() {
     super.initState();
     _summaryFuture = _loadSummaryPayload();
+    if (_sinanEkrani) unawaited(_yukleSonAlimFiyatlari());
+  }
+
+  /// Fatura özeti beklenmez. Fiyat gelmezse birim fiyat olduğu gibi kalır.
+  Future<void> _yukleSonAlimFiyatlari() async {
+    try {
+      final liste = await widget.api.sonAlimFiyatlari(docId: _invoiceDocId);
+      if (!mounted || liste.isEmpty) return;
+      final sonraki = <int, ({num fiyat, String paraBirimi})>{};
+      for (final e in liste) {
+        final sira = int.tryParse('${e['sira']}') ?? 0;
+        final fiyat = _asNum(e['fiyat']);
+        final pb = e['paraBirimi']?.toString() ?? '';
+        if (sira < 1 || fiyat == null || fiyat <= 0) continue;
+        sonraki[sira - 1] = (fiyat: fiyat, paraBirimi: pb);
+      }
+      if (!mounted || sonraki.isEmpty) return;
+      setState(() {
+        _sonAlim
+          ..clear()
+          ..addAll(sonraki);
+      });
+    } catch (_) {
+      // Fonksiyon yayında değilse veya okuma olmazsa parantez yazılmaz.
+    }
+  }
+
+  String _sonAlimParantezi(int index, String yeniFiyat) {
+    final son = _sonAlim[index];
+    if (son == null) return '';
+    return sonAlimFiyatParantezi(
+      fiyat: son.fiyat,
+      paraBirimi: son.paraBirimi,
+      yeniFiyatMetni: yeniFiyat,
+    );
   }
 
   @override
@@ -2500,51 +2575,48 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
     super.dispose();
   }
 
-  Future<void> _submit(String decision) async {
-    if (_saving) return;
-    setState(() => _saving = true);
-    try {
-      final kalemState = _kalemAciklamaPanelKey.currentState;
-      if (kalemState != null) {
-        final kalemOk = await kalemState.saveAllPending(redAciklamasi: decision == 'reddedildi');
-        if (!kalemOk) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text(
-                  'Kalem açıklamaları kaydedilemedi. Onay işlemi iptal edildi.',
-                ),
-              ),
-            );
-          }
-          return;
-        }
-      }
+  void _submit(String decision) {
+    final messenger = ScaffoldMessenger.of(context);
+    final note = _noteCtrl.text;
+    final docId = _invoiceDocId;
+    final role = _aciklamaRoleForApi();
+    final belgeNo = (widget.item['belgeNo']?.toString() ?? '').trim();
+    final kalem = _kalemAciklamaPanelKey.currentState?.saveAllPending(
+      redAciklamasi: decision == 'reddedildi',
+    );
+    final bitti = widget.onIslemBitti;
+    widget.onIslemBasladi?.call();
+    Navigator.of(context).pop();
+    unawaited(yonetimOnayiniBitir(
+      messenger: messenger,
+      api: widget.api,
+      docId: docId,
+      decision: decision,
+      note: note,
+      aciklamaRole: role,
+      belgeNo: belgeNo,
+      kalemKaydi: kalem,
+      bitti: bitti,
+    ));
+  }
 
-      final res = await widget.api.updateQnbInvoiceYonetimOnay(
-        docId: _invoiceDocId,
-        decision: decision,
-        note: _noteCtrl.text,
-        aciklamaRole: _aciklamaRoleForApi(),
-      );
-      if (!mounted) return;
-      final routed = (res['routedToBirim']?.toString() ?? '').trim();
-      final msg = switch (decision) {
-        'onaya_sunuldu' when routed == 'erdem' => 'Fatura Erdem onayına gönderildi.',
-        'onaya_sunuldu' when routed == 'sinan' => 'Fatura Sinan onayına gönderildi.',
-        'onaya_sunuldu' => 'Fatura onaya sunuldu olarak kaydedildi.',
-        'onaylandı' => 'Fatura onaylandı olarak kaydedildi.',
-        _ => 'Fatura reddedildi olarak kaydedildi.',
-      };
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-      Navigator.of(context).pop(true);
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
-      }
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
+  Future<void> _yonlendir() async {
+    final uid = await showAraOnayYonlendirDialog(context, api: widget.api, item: widget.item);
+    if (!mounted || uid == null || uid.isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final docId = _invoiceDocId;
+    final belgeNo = (widget.item['belgeNo']?.toString() ?? '').trim();
+    final bitti = widget.onIslemBitti;
+    widget.onIslemBasladi?.call();
+    Navigator.of(context).pop();
+    unawaited(faturayiYonlendirBitir(
+      messenger: messenger,
+      api: widget.api,
+      docId: docId,
+      targetUid: uid,
+      belgeNo: belgeNo,
+      bitti: bitti,
+    ));
   }
 
   Widget _bottomActions(BuildContext context) {
@@ -2574,7 +2646,6 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
                 maxLines: 2,
                 minLines: 1,
                 textInputAction: TextInputAction.newline,
-                enabled: !_saving,
               ),
               const SizedBox(height: 8),
               Row(
@@ -2585,16 +2656,8 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
                         padding: const EdgeInsets.symmetric(vertical: 10),
                         visualDensity: VisualDensity.compact,
                       ),
-                      onPressed: _saving
-                          ? null
-                          : () => _submit(_isAraOnay ? 'onaya_sunuldu' : 'onaylandı'),
-                      child: _saving
-                          ? const SizedBox(
-                              height: 20,
-                              width: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : Text(_isAraOnay ? 'Onaya Sun' : 'Onayla'),
+                      onPressed: () => _submit(_isAraOnay ? 'onaya_sunuldu' : 'onaylandı'),
+                      child: Text(_isAraOnay ? 'Onaya Sun' : 'Onayla'),
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -2604,7 +2667,7 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
                         padding: const EdgeInsets.symmetric(vertical: 10),
                         visualDensity: VisualDensity.compact,
                       ),
-                      onPressed: _saving ? null : () => _submit('reddedildi'),
+                      onPressed: () => _submit('reddedildi'),
                       child: const Text('Reddet'),
                     ),
                   ),
@@ -2733,16 +2796,11 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
                 );
               },
             ),
-          if (_normalizedUserRole() == 'ara_onay')
+          if (_normalizedUserRole() == 'ara_onay' || _normalizedUserRole() == 'muhasebe2')
             IconButton(
               tooltip: 'Yönlendir',
               icon: const Icon(Icons.person_search_outlined),
-              onPressed: () async {
-                final ok =
-                    await showAraOnayYonlendirDialog(context, api: widget.api, item: widget.item);
-                if (!context.mounted) return;
-                if (ok) Navigator.of(context).pop(true);
-              },
+              onPressed: _yonlendir,
             ),
         ],
       ),
@@ -2842,12 +2900,30 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
                 ),
               ],
               const SizedBox(height: 16),
+              _ozetBolumBaslik(context, 'Teslim belgesi'),
+              _ozetCard(
+                context,
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  child: TeslimBelgesiOzet(
+                    anahtarlar: {
+                      (f['belgeNo'] ?? '').toString(),
+                      for (final d in irs) (d['belgeNo'] ?? '').toString(),
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
               _ozetBolumBaslik(context, 'Mal / hizmet'),
               _ozetCard(
                 context,
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
-                  child: _buildKalemTablosu(context, f['kalemler'] as List<dynamic>? ?? []),
+                  child: _buildKalemTablosu(
+                    context,
+                    f['kalemler'] as List<dynamic>? ?? [],
+                    sonAlim: _sinanEkrani,
+                  ),
                 ),
               ),
               const SizedBox(height: 8),
@@ -3172,7 +3248,8 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
   }
 
   /// UBL / belgeOzet alan adları sütun başlığı; satırlar faturaya göre birleşir (yatay kaydırma).
-  Widget _buildKalemTablosu(BuildContext context, List<dynamic> kalemler) {
+  /// [sonAlim] yalnız fatura kalemlerinde. İrsaliye tablosu bu fiyatı göstermez.
+  Widget _buildKalemTablosu(BuildContext context, List<dynamic> kalemler, {bool sonAlim = false}) {
     if (kalemler.isEmpty) {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 8),
@@ -3203,7 +3280,11 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
     }
 
     const siraGenislik = 44.0;
-    final genislikler = <double>[siraGenislik, ...keys.map(_kalemDinamikSutunGenisligi)];
+    final sonAlimVar = sonAlim && _sonAlim.isNotEmpty;
+    final genislikler = <double>[
+      siraGenislik,
+      ...keys.map((k) => _kalemSutunGenisligi(k, sonAlim: sonAlimVar)),
+    ];
     final tabloGenislik = genislikler.fold<double>(0, (a, b) => a + b);
     final kenar = BorderSide(color: cs.outline.withValues(alpha: 0.9), width: 0.5);
     final icKenar = TableBorder(
@@ -3298,7 +3379,13 @@ class _InvoiceJsonReviewScreenState extends State<InvoiceJsonReviewScreen> {
             hucre('${i + 1}', hiza: TextAlign.center),
             ...keys.map((k) {
               final m = ublMap(rows[i]);
-              final v = m[k]?.trim() ?? '';
+              var v = m[k]?.trim() ?? '';
+              if (sonAlim &&
+                  (k == 'Price/PriceAmount' || k == 'kargo/birimFiyat') &&
+                  v.isNotEmpty) {
+                final ek = _sonAlimParantezi(i, v);
+                if (ek.isNotEmpty) v = '$v ($ek)';
+              }
               return hucre(
                 v.isEmpty ? null : v,
                 hiza: _kalemUblSutunHizasi(k),

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -5,8 +6,10 @@ import 'package:pdf/pdf.dart';
 import 'package:printing/printing.dart';
 
 import '../services/qnb_api.dart';
+import '../services/teslim_belgesi.dart';
 import '../utils/open_bytes.dart';
 import '../widgets/ara_onay_yonlendir_dialog.dart';
+import '../widgets/teslim_belgesi_gorunum.dart';
 
 String _safeDocKey(String s) => s.replaceAll(RegExp(r'[/\\]'), '_');
 
@@ -23,11 +26,13 @@ class _PdfTab {
     required this.title,
     this.bytes,
     this.error,
+    this.teslimler,
   });
 
   final String title;
   final Uint8List? bytes;
   final String? error;
+  final List<TeslimBelgesi>? teslimler;
 }
 
 /// Fatura + ilgili irsaliye PDF/UBL önizlemesi ve yönetim onayı.
@@ -37,6 +42,8 @@ class InvoicePdfReviewScreen extends StatefulWidget {
     required this.api,
     required this.item,
     this.userRole,
+    this.onIslemBasladi,
+    this.onIslemBitti,
   });
 
   final QnbApi api;
@@ -45,6 +52,12 @@ class InvoicePdfReviewScreen extends StatefulWidget {
   /// [UserHomeRouter] / `user_profiles.role` (`ara_onay`, `nihai_onay`, `muhasebe`, `admin`, …).
   final String? userRole;
 
+  /// Onay, red veya yönlendirme düğmesine basılınca, istek bitmeden önce.
+  final VoidCallback? onIslemBasladi;
+
+  /// Arka plandaki istek bitince.
+  final VoidCallback? onIslemBitti;
+
   @override
   State<InvoicePdfReviewScreen> createState() => _InvoicePdfReviewScreenState();
 }
@@ -52,13 +65,12 @@ class InvoicePdfReviewScreen extends StatefulWidget {
 class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
   late final Future<List<_PdfTab>> _tabsFuture;
   final TextEditingController _noteCtrl = TextEditingController();
-  bool _saving = false;
 
   /// `ara_onay` / `ikinci_ara_onay` / `nihai_onay` / `muhasebe`: sade görünüm (TabBarView); muhasebede alt çubukta not/onay/red yok.
   bool get _isMinimalApproverUi {
     final r =
         widget.userRole?.trim().toLowerCase().replaceAll(RegExp(r'\s+'), '_') ?? '';
-    return r == 'ara_onay' || r == 'ikinci_ara_onay' || r == 'nihai_onay' || r == 'muhasebe';
+    return r == 'ara_onay' || r == 'ikinci_ara_onay' || r == 'nihai_onay' || r == 'muhasebe' || r == 'muhasebe2';
   }
 
   /// Muhasebe: yalnızca önizleme; açıklama alanı ve Onayla/Reddet gösterilmez.
@@ -72,7 +84,7 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
   bool get _isAraOnay {
     final r =
         widget.userRole?.trim().toLowerCase().replaceAll(RegExp(r'\s+'), '_') ?? '';
-    return r == 'ara_onay' || r == 'ikinci_ara_onay';
+    return r == 'ara_onay' || r == 'ikinci_ara_onay' || r == 'muhasebe2';
   }
 
   String _normalizedUserRole() =>
@@ -81,7 +93,7 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
   /// Cloud Function notunu hangi Firestore açıklama alanına yazacağını belirtir.
   String? _aciklamaRoleForApi() {
     final r = _normalizedUserRole();
-    if (r == 'ikinci_ara_onay') return 'ara_onay';
+    if (r == 'ikinci_ara_onay' || r == 'muhasebe2') return 'ara_onay';
     if (r == 'ara_onay' || r == 'nihai_onay' || r == 'muhasebe' || r == 'admin') return r;
     return null;
   }
@@ -105,6 +117,7 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
     }
     final invoiceDocId = 'invoice_${_safeDocKey(belgeNo)}';
     final out = <_PdfTab>[];
+    final teslimAnahtarlari = <String>{belgeNo};
 
     try {
       final b = await widget.api.fetchPdfBytes(invoiceDocId);
@@ -123,6 +136,7 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
       for (final d in despatches) {
         final dBelgeNo = (d['belgeNo']?.toString() ?? '').trim();
         if (dBelgeNo.isEmpty) continue;
+        teslimAnahtarlari.add(dBelgeNo);
         final despatchDocId = 'despatch_${_safeDocKey(dBelgeNo)}';
         try {
           final b = await widget.api.fetchPdfBytes(despatchDocId);
@@ -135,6 +149,13 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
       out.add(_PdfTab(title: 'İrsaliyeler', error: e.toString()));
     }
 
+    try {
+      final teslimler = await TeslimBelgesiServisi.listele(teslimAnahtarlari);
+      out.add(_PdfTab(title: 'Teslim belgesi', teslimler: teslimler));
+    } catch (e) {
+      out.add(_PdfTab(title: 'Teslim belgesi', error: e.toString()));
+    }
+
     return out;
   }
 
@@ -144,51 +165,61 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
   }
 
   List<Widget> _araOnayBarActions(BuildContext context) {
-    if (_normalizedUserRole() != 'ara_onay') return const [];
+    final rol = _normalizedUserRole();
+    if (rol != 'ara_onay' && rol != 'muhasebe2') return const [];
     return [
       IconButton(
         tooltip: 'Yönlendir',
         icon: const Icon(Icons.person_search_outlined),
-        onPressed: () async {
-          final ok = await showAraOnayYonlendirDialog(context, api: widget.api, item: widget.item);
-          if (!context.mounted) return;
-          if (ok) Navigator.of(context).pop(true);
-        },
+        onPressed: _yonlendir,
       ),
     ];
   }
 
-  Future<void> _submit(String decision) async {
-    if (_saving) return;
-    setState(() => _saving = true);
-    try {
-      final res = await widget.api.updateQnbInvoiceYonetimOnay(
-        docId: _invoiceDocId,
-        decision: decision,
-        note: _noteCtrl.text,
-        aciklamaRole: _aciklamaRoleForApi(),
-      );
-      if (!mounted) return;
-      final routed = (res['routedToBirim']?.toString() ?? '').trim();
-      final msg = switch (decision) {
-        'onaya_sunuldu' when routed == 'erdem' => 'Fatura Erdem onayına gönderildi.',
-        'onaya_sunuldu' when routed == 'sinan' => 'Fatura Sinan onayına gönderildi.',
-        'onaya_sunuldu' => 'Fatura onaya sunuldu olarak kaydedildi.',
-        'onaylandı' => 'Fatura onaylandı olarak kaydedildi.',
-        _ => 'Fatura reddedildi olarak kaydedildi.',
-      };
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-      Navigator.of(context).pop(true);
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
-      }
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
+  void _submit(String decision) {
+    final messenger = ScaffoldMessenger.of(context);
+    final note = _noteCtrl.text;
+    final docId = _invoiceDocId;
+    final role = _aciklamaRoleForApi();
+    final belgeNo = (widget.item['belgeNo']?.toString() ?? '').trim();
+    final bitti = widget.onIslemBitti;
+    widget.onIslemBasladi?.call();
+    Navigator.of(context).pop();
+    unawaited(yonetimOnayiniBitir(
+      messenger: messenger,
+      api: widget.api,
+      docId: docId,
+      decision: decision,
+      note: note,
+      aciklamaRole: role,
+      belgeNo: belgeNo,
+      bitti: bitti,
+    ));
+  }
+
+  Future<void> _yonlendir() async {
+    final uid = await showAraOnayYonlendirDialog(context, api: widget.api, item: widget.item);
+    if (!mounted || uid == null || uid.isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final docId = _invoiceDocId;
+    final belgeNo = (widget.item['belgeNo']?.toString() ?? '').trim();
+    final bitti = widget.onIslemBitti;
+    widget.onIslemBasladi?.call();
+    Navigator.of(context).pop();
+    unawaited(faturayiYonlendirBitir(
+      messenger: messenger,
+      api: widget.api,
+      docId: docId,
+      targetUid: uid,
+      belgeNo: belgeNo,
+      bitti: bitti,
+    ));
   }
 
   Widget _buildPreviewBody(BuildContext context, _PdfTab t) {
+    if (t.teslimler != null) {
+      return TeslimBelgesiGaleri(belgeler: t.teslimler!);
+    }
     if (t.error != null) {
       return Center(
         child: Padding(
@@ -270,7 +301,6 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
                 maxLines: 2,
                 minLines: 1,
                 textInputAction: TextInputAction.newline,
-                enabled: !_saving,
               ),
               const SizedBox(height: 8),
               Row(
@@ -281,16 +311,8 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
                         padding: const EdgeInsets.symmetric(vertical: 10),
                         visualDensity: VisualDensity.compact,
                       ),
-                      onPressed: _saving
-                          ? null
-                          : () => _submit(_isAraOnay ? 'onaya_sunuldu' : 'onaylandı'),
-                      child: _saving
-                          ? const SizedBox(
-                              height: 20,
-                              width: 20,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : Text(_isAraOnay ? 'Onaya Sun' : 'Onayla'),
+                      onPressed: () => _submit(_isAraOnay ? 'onaya_sunuldu' : 'onaylandı'),
+                      child: Text(_isAraOnay ? 'Onaya Sun' : 'Onayla'),
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -300,7 +322,7 @@ class _InvoicePdfReviewScreenState extends State<InvoicePdfReviewScreen> {
                         padding: const EdgeInsets.symmetric(vertical: 10),
                         visualDensity: VisualDensity.compact,
                       ),
-                      onPressed: _saving ? null : () => _submit('reddedildi'),
+                      onPressed: () => _submit('reddedildi'),
                       child: const Text('Reddet'),
                     ),
                   ),
